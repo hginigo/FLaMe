@@ -1,0 +1,5 @@
+obj/
+blokek
+*.o
+*.d
+.claude/
