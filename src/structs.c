@@ -1,220 +1,120 @@
 #include "structs.h"
 #include <stdio.h>
+#include <string.h>
 
 FILE *result;
 FILE *debug;
 
-void blocks_read(struct vp_vec *blocks)
+struct replica *replica_alloc(struct model *m, struct node *n,
+	void *params, size_t nbytes, unsigned int version, time_t stamp)
 {
-	size_t n_blocks;
-	size_t id, block_size;
-	FILE *f = fopen("blocks", "r");
-	struct block *b;
-
-	if (f == NULL) {
-		perror("fopen");
-		exit(1);
-	}
-
-	fscanf(f, "%lu\n", &n_blocks);
-	dbg("n blocks: %lu\n", n_blocks);
-	vp_vec_alloc(blocks, n_blocks);
-	for (size_t i = 0; i < n_blocks; i++) {
-		fscanf(f, "%lu %lu\n", &id, &block_size);
-		dbg("b id: %lu, b size: %lu\n", id, block_size);
-		b = malloc(sizeof(struct block));
-		if (b == NULL) {
-			perror("malloc");
-			exit(1);
-		}
-		b->id = id;
-		b->size = block_size;
-		//b->state = EXCLUSIVE;
-
-		vp_vec_set(blocks, id, b);
-	}
-	fclose(f);
-	for (size_t i = 0; i < blocks->length; i++) {
-		b = vp_vec_get(blocks, i);
-		dbg("b id: %ld b sz: %ld\n", b->id, b->size);
-	}
+	struct replica *r = malloc(sizeof(struct replica));
+	r->model = m;
+	r->node = n;
+	r->params = params;
+	r->nbytes = nbytes;
+	r->version = version;
+	r->stamp = stamp;
+	return r;
 }
 
-void blocks_free(struct vp_vec *blocks)
+/* Deep-copies params: used whenever a *second* physical copy comes into
+ * existence (multi-copy replication, or a staged snapshot pulled from a
+ * peer) rather than a single copy just changing hands. */
+struct replica *replica_dup(const struct replica *src, struct node *n, time_t stamp)
 {
-	struct block *b;
-	for (size_t i = 0; i < blocks->length; i++) {
-		b = vp_vec_get(blocks, i);
-		if (b->owners.data != NULL) {
-			vp_vec_free(&b->owners);
-		}
-		free(b);
+	void *params = NULL;
+	if (src->nbytes > 0) {
+		params = malloc(src->nbytes);
+		memcpy(params, src->params, src->nbytes);
 	}
-	vp_vec_free(blocks);
+	return replica_alloc(src->model, n, params, src->nbytes, src->version, stamp);
 }
 
-void nodes_read(struct vp_vec *nodes, const struct vp_vec *blocks)
+void replica_free(struct replica *r)
 {
-	size_t n_nodes;
-	size_t id, n_blocks;
-	size_t block_id;
-	const struct vp_vec zero = {0};
+	if (!r) return;
+	free(r->params);
+	free(r);
+}
 
-	struct node *n;
-	struct block *cur_block;
-	FILE *f = fopen("nodes", "r");
-
-	if (f == NULL) {
-		perror("fopen");
-		exit(1);
-	}
-
-	fscanf(f, "%lu\n", &n_nodes);
-	dbg("n nodes: %lu\n", n_nodes);
-	vp_vec_alloc(nodes, n_nodes);
-	for (size_t i = 0; i < n_nodes; i++) {
-		fscanf(f, "%lu %lu", &id, &n_blocks);
-		dbg("node id: %lu, n blocks: %lu\n", id, n_blocks);
-
-		n = malloc(sizeof(struct node));
-		n->id = id;
-        //n->state = IDLE;
-		n->task_queue = zero;
-		// n->blocks = malloc(sizeof(struct vp_vec));
-		//vp_vec_alloc(&n->blocks, n_blocks);
-
-		for (size_t j = 0; j < n_blocks; j++) {
-			fscanf(f, " %lu", &block_id);
-			cur_block = vp_vec_get(blocks, block_id);
-			cur_block->dir_id = id;
-			//vp_vec_append(&n->blocks, cur_block);
-			vp_vec_append(&cur_block->owners, n);
-			dbg(" %lu", block_id);
+struct replica *model_replica_of(const struct model *m, const struct node *n)
+{
+	struct replica *r;
+	vp_for (r, &m->replicas) {
+		if (r->node == n) {
+			return r;
 		}
-		dbg("\n");
-		fscanf(f, "\n");
-		vp_vec_set(nodes, id, n);
 	}
-	nodes->length = n_nodes;
-	fclose(f);
+	return NULL;
+}
+
+struct replica *model_replica_first(const struct model *m)
+{
+	if (m->replicas.length == 0) return NULL;
+	return vp_vec_get(&m->replicas, 0);
+}
+
+/* Frees every replica currently attached to the model (they are owned
+ * heap objects, unlike the borrowed node pointers `owners` used to hold). */
+void model_replica_clear(struct model *m)
+{
+	struct replica *r;
+	vp_for (r, &m->replicas) {
+		replica_free(r);
+	}
+	m->replicas.length = 0;
+}
+
+/* Same physical replica, new holder: no bytes move, just reassign. */
+void model_replica_relocate(struct replica *r, struct node *n)
+{
+	r->node = n;
+}
+
+/* Frees every replica in m->replicas except `keep`, then leaves replicas
+ * holding just [keep]. Used by the write-invalidate policies collapsing a
+ * multi-copy set back down to one. */
+void model_replica_keep_only(struct model *m, struct replica *keep)
+{
+	struct replica *r;
+	vp_for (r, &m->replicas) {
+		if (r != keep) {
+			replica_free(r);
+		}
+	}
+	m->replicas.length = 0;
+	vp_vec_append(&m->replicas, keep);
+}
+
+void models_free(struct vp_vec *models)
+{
+	struct model *m;
+	for (size_t i = 0; i < models->length; i++) {
+		m = vp_vec_get(models, i);
+		model_replica_clear(m);
+		if (m->replicas.data != NULL) {
+			vp_vec_free(&m->replicas);
+		}
+		free(m);
+	}
+	vp_vec_free(models);
 }
 
 void nodes_free(struct vp_vec *nodes)
 {
 	struct node *n;
+	struct replica *r;
 	for (size_t i = 0; i < nodes->length; i++) {
 		n = vp_vec_get(nodes, i);
-		//vp_vec_free(&n->blocks);
 		vp_vec_free(&n->task_queue);
+		vp_for (r, &n->staged) {
+			replica_free(r);
+		}
+		if (n->staged.data != NULL) {
+			vp_vec_free(&n->staged);
+		}
 		free(n);
 	}
 	vp_vec_free(nodes);
-}
-
-void operations_read(struct vp_vec *events,
-					 const struct vp_vec *blocks,
-					 const struct vp_vec *nodes)
-{
-	size_t n_op;
-	char c;
-	size_t node_id, block_id;
-	struct task *op;
-	struct node *n;
-	struct block *b;
-	FILE *f = fopen("events", "r");
-
-	if (f == NULL) {
-		perror("fopen");
-		exit(1);
-	}
-
-	fscanf(f, "%lu\n", &n_op);
-	dbg("n ops: %lu\n", n_op);
-	vp_vec_alloc(events, n_op);
-	for (size_t i = 0; i < n_op; i++) {
-		fscanf(f, "%c %lu %lu\n", &c, &node_id, &block_id);
-		printf("'%c' %lu %lu\n", c, node_id, block_id);
-		op = malloc(sizeof(struct task));
-		switch (c) {
-		case 'r':
-			op->type = READ;
-			break;
-		case 'w':
-			op->type = WRITE;
-			break;
-		}
-		n = vp_vec_get(nodes, node_id);
-		b = vp_vec_get(blocks, block_id);
-		// op->time = 0;
-		op->node = n;
-		op->block = b;
-		vp_vec_append(events, op);
-		printf("event: %c\n", c);
-		printf("  n id: %u\n", n->id);
-		printf("  b id: %u (dir %u)\n", b->id, b->dir_id);
-	}
-	fclose(f);
-}
-
-void operations_free(struct vp_vec *events)
-{
-	struct event *op;
-	for (size_t i = 0; i < events->length; i++) {
-		op = vp_vec_get(events, i);
-		free(op);
-	}
-	vp_vec_free(events);
-}
-/*
-void topology_read(struct topology *t)
-{
-	size_t num_nodes;
-	int *graph;
-	int aux;
-	FILE *f = fopen("topology", "r");
-	assert(t != NULL && "Topology is NULL");
-
-	if (f == NULL) {
-		perror("fopen");
-		exit(1);
-	}
-
-	fscanf(f, "%lu\n", &num_nodes);
-	graph = malloc(sizeof(int) * num_nodes * num_nodes);
-	for (size_t i = 0; i < num_nodes; i++) {
-		for (size_t j = 0; j < num_nodes; j++) {
-			fscanf(f, " %d", &aux);
-			graph[i + j*num_nodes] = aux;
-		}
-		fscanf(f, "\n");
-	}
-	t->num_nodes = num_nodes;
-	t->graph = graph;
-}
-
-void topology_free(struct topology *t)
-{
-	free(t->graph);
-}
-
-int topology_bfs(struct topology *t)
-{
-	int cost = 0;
-	struct vp_vec queue;
-	vp_vec_alloc(&queue, t->num_nodes * t->num_nodes);
-
-	for (size_t i = 0; i < t->num_nodes; i++) {
-		for (size_t j = 0; j < t->num_nodes; j++) {
-			t->graph[i * t->num_nodes + j];
-		}
-	}
-	vp_vec_free(&queue);
-}
-	*/
-
-struct event *event_new()
-{
-	struct event *result = malloc(sizeof(struct event));
-
-	return result;
 }

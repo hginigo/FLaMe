@@ -22,6 +22,9 @@ int load_config(const char *path, struct config *cfg) {
     /* Safe defaults */
     memset(cfg, 0, sizeof(*cfg));
     cfg->blocks_per_node = 1;
+    cfg->epochs = 1;
+    cfg->ms_per_epoch = 500;
+    strncpy(cfg->model_name, "stub", MAX_VAL_LEN - 1);
 
     char line[MAX_LINE_LEN];
     int  lineno = 0;
@@ -65,6 +68,20 @@ int load_config(const char *path, struct config *cfg) {
             int b = parse_bool(val);
             if (b < 0) fprintf(stderr, "Warning: unknown bool '%s' for key '%s'\n", val, key);
             else cfg->barriers = b;
+        } else if (strcmp(key, "backend_cmd") == 0) {
+            strncpy(cfg->backend_cmd, val, MAX_VAL_LEN - 1);
+            cfg->backend_cmd[MAX_VAL_LEN - 1] = '\0';
+        } else if (strcmp(key, "model_name") == 0) {
+            strncpy(cfg->model_name, val, MAX_VAL_LEN - 1);
+            cfg->model_name[MAX_VAL_LEN - 1] = '\0';
+        } else if (strcmp(key, "epochs") == 0) {
+            cfg->epochs = atoi(val);
+        } else if (strcmp(key, "nshards") == 0) {
+            cfg->nshards = atoi(val);
+        } else if (strcmp(key, "ms_per_epoch") == 0) {
+            cfg->ms_per_epoch = atoll(val);
+        } else if (strcmp(key, "latency_ms") == 0) {
+            cfg->latency_ms = atoi(val);
         } else {
             fprintf(stderr, "Warning: unknown key '%s' on line %d\n", key, lineno);
         }
@@ -73,25 +90,3 @@ int load_config(const char *path, struct config *cfg) {
     fclose(fp);
     return 0;
 }
-
-void print_config(const struct config *cfg) {
-    printf("block_size        = %d\n",    cfg->block_size);
-    printf("topology_directed = %s\n",    cfg->topology_directed ? "on" : "off");
-    printf("output       = %s\n",    cfg->output);
-    printf("debug       = %s\n",    cfg->debug);
-    printf("barriers          = %s\n",    cfg->barriers          ? "on" : "off");
-}
-
-/*
-int main(int argc, char *argv[]) {
-    const char *path = (argc > 1) ? argv[1] : "config.conf";
-
-    struct config cfg;
-    if (load_config(path, &cfg) != 0) {
-        return EXIT_FAILURE;
-    }
-
-    print_config(&cfg);
-    return EXIT_SUCCESS;
-}
-*/

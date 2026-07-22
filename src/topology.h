@@ -7,6 +7,7 @@ struct link {
     id_t orig;
     id_t dest;
     int weight;
+    int latency;        /* fixed one-hop propagation delay, in ms */
     struct vp_vec active_flows;
 };
 
@@ -17,25 +18,22 @@ struct topology {
     struct topology *virt_topo;
 };
 
-void topo_read(char *str, struct topology *t);
 struct link *link_alloc(id_t orig,
                         id_t dest,
-                        int weight);
-void link_free(struct link *d);
+                        int weight,
+                        int latency);
 void topo_init(struct topology *t, size_t num_nodes);
 void topo_free(struct topology *t);
-int dijkstra(const struct topology *t,
-             id_t orig,
-             id_t dest,
-             int *n_hops);
 
 void dijkstra_init(const struct topology *t);
-void dist_cache_print();
 void path_resolve(const struct topology *t,
     id_t orig,
     id_t dest,
     struct vp_vec *path);
 int path_hops(const struct topology *t,
+    id_t orig,
+    id_t dest);
+int path_latency(const struct topology *t,
     id_t orig,
     id_t dest);
 int topo_multi_read(char *str, struct topology *t);

@@ -18,21 +18,6 @@ extern FILE *result;
 #define Bpms (1024 * 1024 / 8 / 1000)
 typedef unsigned int id_t;
 
-/*
-enum block_state {
-	INVALID,
-	EXCLUSIVE,
-	SHARED,
-	DIRTY,
-};
-*/
-
-/*
-enum node_state {
-    IDLE,
-    BUSY,
-};
-*/
 enum policy_t {
 	S_COPY_UPD,
 	S_COPY_MOV,
@@ -47,14 +32,37 @@ enum policy_t {
 #define DIR_DISTRIB -3
 #define DIR_RANDOM -4
 
-struct block {
+/*
+ * A model is the *descriptor* only: identity and wire size. It carries no
+ * parameters of its own, because in decentralised FL every holder's copy
+ * diverges. The parameters live in the per-holder replicas below.
+ */
+struct model {
 	id_t id;
 	id_t dir_id;
-	size_t size;
+	size_t size;		/* payload size on the wire, in bytes */
 	id_t group;
-	//enum block_state state;
-	//struct vp_vec copies; // node id's
-	struct vp_vec owners;
+	struct vp_vec replicas;	/* struct replica* — one per holding node */
+};
+
+/*
+ * One node's copy of one model. `params` is an opaque blob: C never looks
+ * inside it, it only stores it, sizes network flows by it, and hands it to
+ * the Python backend, which alone knows what the bytes mean. That is what
+ * keeps the simulator model-agnostic.
+ *
+ * Two replicas of the same model routinely differ — that is the point.
+ * Replicas reachable from model->replicas are "owned" in the coherence
+ * sense; node->staged holds detached snapshots pulled from peers and not
+ * yet folded into the holder's own model.
+ */
+struct replica {
+	struct model *model;
+	struct node *node;	/* holder */
+	void *params;		/* opaque; owned here, freed with the replica */
+	size_t nbytes;
+	unsigned int version;
+	time_t stamp;		/* sim_time these params were produced/captured */
 };
 
 #define N_OPS 5
@@ -70,15 +78,15 @@ struct node {
 	struct vp_vec task_queue;
 #endif
 	struct task *current_task;
-    //enum node_state state;
 	id_t id;
 	id_t group;
 	long long op_time[N_OPS];
+	struct vp_vec staged;	/* struct replica* pulled from peers, unaggregated */
+	double loss, acc;	/* last values reported by the backend */
+	int trained;		/* has the backend ever trained this node? */
 };
 
 enum task_t {
-	//REQUEST,
-	//REPLY,
 	READ,
 	WRITE,
 	TRAIN,
@@ -88,8 +96,7 @@ enum task_t {
 /* Associated to workloads */
 struct task {
 	struct node *node;
-	struct block *block;
-	//time_t time;
+	struct model *model;
 	id_t id;
 	int size;
 	int flow_rc;
@@ -105,11 +112,12 @@ enum event_t {
 	ROUND_BARRIER
 };
 
-/* Associated to the  */
+/* Associated to the event queue */
 struct event {
 	enum event_t type;
 	time_t dispatch_time;
 	id_t id;
+	int stale;		/* lazy invalidation: superseded finish event */
 	union {
 		struct node *n;
 		struct task *t;
@@ -130,14 +138,17 @@ struct flow {
 	struct event *finish_ev;
 };
 
-void blocks_read(struct vp_vec *blocks);
-void blocks_free(struct vp_vec *blocks);
-void nodes_read(struct vp_vec *nodes, const struct vp_vec *blocks);
+void models_free(struct vp_vec *models);
 void nodes_free(struct vp_vec *nodes);
-void operations_read(struct vp_vec *operations,
-					 const struct vp_vec *blocks,
-					 const struct vp_vec *nodes);
-void operations_free(struct vp_vec *operations);
-struct event *event_new();
+
+struct replica *replica_alloc(struct model *m, struct node *n,
+	void *params, size_t nbytes, unsigned int version, time_t stamp);
+struct replica *replica_dup(const struct replica *src, struct node *n, time_t stamp);
+void replica_free(struct replica *r);
+struct replica *model_replica_of(const struct model *m, const struct node *n);
+struct replica *model_replica_first(const struct model *m);
+void model_replica_clear(struct model *m);
+void model_replica_relocate(struct replica *r, struct node *n);
+void model_replica_keep_only(struct model *m, struct replica *keep);
 
 #endif // _STRUCTS_H

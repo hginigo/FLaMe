@@ -14,24 +14,22 @@
 #include "config.h"
 #include "event.h"
 #include "flow.h"
+#include "backend.h"
 #define VP_VEC_IMPLEMENTATION
 #include "vp_vec.h"
 #define VP_LIST_IMPLEMENTATION
 #include "vp_list.h"
-
-#define ETH_LATENCY 40
+#define VP_HEAP_IMPLEMENTATION
+#include "vp_heap.h"
 
 struct topology topology = {0};
 struct vp_vec nodes;
-struct vp_vec blocks;
-#ifdef USE_VP_LIST_QUEUE
-struct vp_list event_queue = {0};
-#else
-struct vp_vec event_queue = {0};
-#endif
+struct vp_vec models;
+struct vp_heap event_queue = {0};
 time_t sim_time;
-enum policy_t policy; // = M_COPY_UPD;
+enum policy_t policy;
 long long total_hops = 0;
+struct config config;
 
 
 void tasks_enqueue(struct vp_vec *task_list)
@@ -45,111 +43,6 @@ void tasks_enqueue(struct vp_vec *task_list)
 #else
 		vp_vec_append(&n->task_queue, t);
 #endif
-	}
-}
-
-void block_size_update(struct block *b, int diff_size)
-{
-	if ((long long) (b->size + diff_size) < 0) {
-		b->size = 1;
-	} else {
-		b->size += diff_size;
-	}
-}
-
-struct node *min_path(const struct vp_vec *nodes,
-					  id_t orig,
-					  int *weight,
-					  int *hops)
-{
-	struct node *n_min, *n_iter;
-	int w_iter, w_min = INT_MAX;
-	int h_iter, h_min;
-	
-	assert(nodes->length != 0);
-
-	vp_for (n_iter, nodes) {
-		w_iter = dijkstra(&topology, orig, n_iter->id, &h_iter);
-		if (w_iter < w_min) {
-			n_min = n_iter;
-			w_min = w_iter;
-			h_min = h_iter;
-		}
-	}
-	*weight = w_min;
-	*hops = h_min;
-	return n_min;
-}
-
-struct node *max_path(const struct vp_vec *nodes,
-					  id_t orig,
-					  int *weight,
-					  int *hops)
-{
-	struct node *n_max, *n_iter;
-	int w_iter, w_max = INT_MIN;
-	int h_iter, h_max;
-	
-	assert(nodes->length != 0);
-	vp_for (n_iter, nodes) {
-		w_iter = dijkstra(&topology, orig, n_iter->id, &h_iter);
-		if (w_iter > w_max) {
-			n_max = n_iter;
-			w_max = w_iter;
-			h_max = h_iter;
-		}
-	}
-	*weight = w_max;
-	*hops = h_max;
-	return n_max;
-}
-
-void vp_vec_filter(struct vp_vec *dest, struct vp_vec *orig, int (*comp)(const void *))
-{
-	void *aux;
-	for (size_t i = 0; i < orig->length; i++) {
-		aux = vp_vec_get(orig, i);
-		if (comp(aux)) {
-			vp_vec_remove(orig, i--);
-			vp_vec_append(dest, aux);
-		}
-	}
-}
-
-void vp_vec_list_filter(struct vp_vec *dest, struct vp_list *orig, int (*comp)(const void *))
-{
-	const void *aux;
-	struct vp_list_node *next;
-	for (struct vp_list_node *i = orig->first; i != NULL && i->status != VP_LIST_NODE_FREE;) {
-		aux = i->item;
-		next = i->next;
-		if (comp(aux)) {
-			vp_list_remove_at(orig, i);
-			vp_vec_append(dest, aux);
-		}
-		i = next;
-	}
-}
-
-int global_directory;
-
-
-void ev_recalc_active_flows()
-{
-	static struct vp_vec marked = {0};
-	struct event *e;
-	time_t old_disp;
-	
-#ifdef USE_VP_LIST_QUEUE
-	vp_vec_list_filter(&marked, &event_queue, is_marked);
-#else
-	vp_vec_filter(&marked, &event_queue, is_marked);
-#endif
-	while (marked.length != 0) {
-		e = vp_vec_pop(&marked);
-		old_disp = e->dispatch_time;
-		e->dispatch_time = flow_recalc_makespan(e->data.f, sim_time);
-		event_enqueue(e);
 	}
 }
 
@@ -169,8 +62,8 @@ void flow_start(const struct event *ev)
 	dbg("flow %d start rB %d (%d) rt[%d]\n",
 		f->id, f->nbytes, f->min_bw/Bpms, f->makespan);
 
-	ev_recalc_active_flows();
-	
+	flows_reschedule(f);
+
 	t->flow_rc++;
 	f->finish_ev = event_alloc(FLOW_FINISH, f->start_time+f->makespan);
 	f->finish_ev->data.f = f;
@@ -187,8 +80,8 @@ void flow_finish(const struct event *ev)
 	if (!topology.directed) {
 		path_detach_flow(&f->path_aux, f);
 	}
-	ev_recalc_active_flows();
-	
+	flows_reschedule(f);
+
 	t->flow_rc--;
 	if (t->flow_rc == 0) {
 		stage_next = event_alloc(STAGE_NEXT, sim_time);
@@ -202,7 +95,7 @@ void dispatcher_init(struct vp_vec *node_list)
 {
 	struct node *n;
 	struct event *ev;
-	
+
 	vp_for (n, node_list) {
 		if (n->task_queue.length > 0) {
 			ev = event_alloc(PULL_TASK, 0);
@@ -214,85 +107,254 @@ void dispatcher_init(struct vp_vec *node_list)
 
 void flow_dbg(struct task *t)
 {
-	struct event *ev;
 	struct node *orig, *dest;
 	if (t->stage == 1) return;
-	
+
 	orig = vp_vec_get(&nodes, 0);
 	dest = vp_vec_get(&nodes, 1);
-	ev = event_alloc(FLOW_START, sim_time);
-	ev->data.f = flow_alloc(orig->id, dest->id, 50, t);
+	flow_enqueue(orig->id, dest->id, 50, t);
+}
+
+#define BARRIER_DEF_MS 0
+
+/*
+ * Locates the replica of `m` nearest (by hop count) to `from`, mirroring
+ * what the old owners-list shortest_path search did — now returning the
+ * replica itself (not just its holder), since callers need both.
+ */
+struct replica *nearest_replica(const struct model *m,
+	const struct node *from,
+	const struct topology *t)
+{
+	struct replica *r, *min = NULL;
+	int hops, min_hops = INT_MAX;
+
+	vp_for (r, &m->replicas) {
+		hops = path_hops(t, from->id, r->node->id);
+		if (hops < min_hops) {
+			min_hops = hops;
+			min = r;
+		}
+	}
+	return min;
+}
+
+/*
+ * The only place a local training step happens. Trains whichever replica
+ * of t->model this node currently holds; if none (a single-copy policy
+ * relocated it elsewhere), trains the ambient sole copy instead, at no
+ * network cost — the original TRAIN task never touched block/owners state
+ * at all, so this preserves that location-agnostic, flow-free character
+ * while still doing real work through the backend.
+ */
+void train_stage(struct task *t)
+{
+	struct node *orig = t->node;
+	struct replica *r = model_replica_of(t->model, orig);
+	unsigned int new_version;
+	long long sim_ms;
+	double loss, acc;
+	void *new_params;
+	size_t new_nbytes;
+	struct event *ev;
+
+	if (!r) {
+		r = model_replica_first(t->model);
+	}
+	assert(r != NULL);
+
+	if (backend_train(orig->id, r->version, config.epochs, r->params, r->nbytes,
+			&new_version, &sim_ms, &loss, &acc, &new_params, &new_nbytes) < 0) {
+		fprintf(stderr, "backend_train failed for node %u\n", orig->id);
+		exit(1);
+	}
+	free(r->params);
+	r->params = new_params;
+	r->nbytes = new_nbytes;
+	r->version = new_version;
+	r->stamp = sim_time + sim_ms;
+	orig->loss = loss;
+	orig->acc = acc;
+	orig->trained = 1;
+
+	ev = event_alloc(PULL_TASK, sim_time + sim_ms);
+	ev->data.n = orig;
 	event_enqueue(ev);
 }
 
-#define TRAIN_DEF_MS 500
-#define BARRIER_DEF_MS 0
+void barrier_stage(struct task *t)
+{
+	struct event *ev = event_alloc(ROUND_BARRIER, sim_time + BARRIER_DEF_MS);
+	ev->data.t = t;
+	event_enqueue(ev);
+}
+
+/*
+ * Aggregates `r` (the current authoritative replica for t->model, wherever
+ * it physically sits) with every snapshot orig has staged since its last
+ * WRITE. Mutates r in place with the backend's result and clears the
+ * staged list. Returns the elapsed sim_ms so the caller can advance time.
+ */
+long long aggregate_into(struct node *orig, struct replica *r)
+{
+	int count = 1 + (int) orig->staged.length;
+	void **blobs = malloc(count * sizeof(void *));
+	size_t *nbytes = malloc(count * sizeof(size_t));
+	long long *stale = malloc(count * sizeof(long long));
+	struct replica *s;
+	int i = 1;
+	long long sim_ms;
+	void *new_params;
+	size_t new_nbytes;
+
+	blobs[0] = r->params;
+	nbytes[0] = r->nbytes;
+	stale[0] = sim_time - r->stamp;
+	vp_for (s, &orig->staged) {
+		blobs[i] = s->params;
+		nbytes[i] = s->nbytes;
+		stale[i] = sim_time - s->stamp;
+		i++;
+	}
+
+	if (backend_aggregate(orig->id, count, stale, blobs, nbytes,
+			&sim_ms, &new_params, &new_nbytes) < 0) {
+		fprintf(stderr, "backend_aggregate failed for node %u\n", orig->id);
+		exit(1);
+	}
+	free(blobs);
+	free(nbytes);
+	free(stale);
+
+	vp_for (s, &orig->staged) {
+		replica_free(s);
+	}
+	orig->staged.length = 0;
+
+	free(r->params);
+	r->params = new_params;
+	r->nbytes = new_nbytes;
+	r->version++;
+	r->stamp = sim_time + sim_ms;
+	return sim_ms;
+}
+
+/*
+ * READ under SCU/SCM (single physical copy). `relocate` selects the
+ * coherence effect on completion: 0 = leave the copy where it is (SCU,
+ * "update"), 1 = the copy migrates to the reader (SCM, "move"). Either
+ * way, a snapshot is staged on the reader for its own next aggregation.
+ */
+void single_copy_read_stage(struct task *t, int relocate)
+{
+	struct event *ev;
+	struct node *orig = t->node, *dest;
+	struct replica *src = model_replica_first(t->model);
+
+	dest = src->node;
+	if (orig->id == dest->id) {
+		ev = event_alloc(PULL_TASK, sim_time);
+		ev->data.n = orig;
+		event_enqueue(ev);
+		return;
+	}
+	switch (t->stage) {
+	case 0:
+		flow_enqueue(orig->id, dest->id, 40, t);
+	break;
+	case 1:
+		flow_enqueue(dest->id, orig->id, src->nbytes, t);
+	break;
+	case 2:
+		vp_vec_append(&orig->staged, replica_dup(src, orig, sim_time));
+		if (relocate) {
+			model_replica_relocate(src, orig);
+		}
+		ev = event_alloc(PULL_TASK, sim_time);
+		ev->data.n = orig;
+		event_enqueue(ev);
+	break;
+	}
+	t->stage++;
+}
+
+/*
+ * READ under MCM/MCU (multi-copy): fetch from the nearest holder and join
+ * the replica set, plus stage a snapshot for the reader's own aggregation.
+ * Byte-identical between the two policies — only their WRITE differs.
+ */
+void multi_copy_read_stage(struct task *t)
+{
+	struct event *ev;
+	struct node *orig = t->node;
+	struct node *dest;
+	struct replica *src;
+
+	if (model_replica_of(t->model, orig)) {
+		ev = event_alloc(PULL_TASK, sim_time);
+		ev->data.n = orig;
+		event_enqueue(ev);
+		return;
+	}
+	switch (t->stage) {
+	case 0:
+		dest = nearest_replica(t->model, orig, &topology)->node;
+		flow_enqueue(orig->id, dest->id, 40, t);
+	break;
+	case 1:
+		src = nearest_replica(t->model, orig, &topology);
+		flow_enqueue(src->node->id, orig->id, src->nbytes, t);
+	break;
+	case 2:
+		src = nearest_replica(t->model, orig, &topology);
+		vp_vec_append(&t->model->replicas, replica_dup(src, orig, sim_time));
+		vp_vec_append(&orig->staged, replica_dup(src, orig, sim_time));
+		ev = event_alloc(PULL_TASK, sim_time);
+		ev->data.n = orig;
+		event_enqueue(ev);
+	break;
+	}
+	t->stage++;
+}
+
 void scu_stage(struct task *t)
 {
 	struct event *ev;
 	struct node *orig, *dest;
+	struct replica *r;
+	long long sim_ms;
+
 	switch (t->type) {
 	case READ:
-		orig = t->node;
-		dest = vp_vec_get(&t->block->owners, 0);
-		if (orig->id == dest->id) {
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = orig;
-			event_enqueue(ev);
-			return;
-		}
-		switch (t->stage) {
-		case 0:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
-		break;
-		case 1:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
-		break;
-		case 2:
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = t->node;
-			event_enqueue(ev);
-		break;
-		default:
-		break;
-		}
-	break;
+		single_copy_read_stage(t, 0);
+		return;
 
 	case WRITE:
 		orig = t->node;
-		dest = vp_vec_get(&t->block->owners, 0);
+		r = model_replica_first(t->model);
+		dest = r->node;
 		if (orig->id == dest->id) {
-			block_size_update(t->block, t->size);
-			ev = event_alloc(PULL_TASK, sim_time);
+			sim_ms = aggregate_into(orig, r);
+			ev = event_alloc(PULL_TASK, sim_time + sim_ms);
 			ev->data.n = orig;
 			event_enqueue(ev);
 			return;
 		}
 		switch (t->stage) {
 		case 0:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
+			flow_enqueue(orig->id, dest->id, 40, t);
 		break;
 		case 1:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
+			flow_enqueue(dest->id, orig->id, r->nbytes, t);
 		break;
 		case 2:
-			block_size_update(t->block, t->size);
-			ev = event_alloc(STAGE_NEXT, sim_time);
+			sim_ms = aggregate_into(orig, r);
+			ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
 			ev->data.t = t;
 			event_enqueue(ev);
 		break;
 		case 3:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, t->block->size, t);
-			event_enqueue(ev);
+			flow_enqueue(orig->id, dest->id, r->nbytes, t);
 		break;
 		case 4:
 			ev = event_alloc(PULL_TASK, sim_time);
@@ -302,15 +364,10 @@ void scu_stage(struct task *t)
 		}
 	break;
 	case TRAIN:
-		orig = t->node;
-		ev = event_alloc(PULL_TASK, sim_time + TRAIN_DEF_MS);
-		ev->data.n = orig;
-		event_enqueue(ev);
-	break;
+		train_stage(t);
+		return;
 	case BARRIER:
-		ev = event_alloc(ROUND_BARRIER, sim_time + BARRIER_DEF_MS);
-		ev->data.t = t;
-		event_enqueue(ev);
+		barrier_stage(t);
 	break;
 	default:
 	break;
@@ -322,66 +379,39 @@ void scm_stage(struct task *t)
 {
 	struct event *ev;
 	struct node *orig, *dest;
+	struct replica *r;
+	long long sim_ms;
 
 	orig = t->node;
 	switch (t->type) {
 	case READ:
-		dest = vp_vec_get(&t->block->owners, 0);
-		if (orig->id == dest->id) {
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = orig;
-			event_enqueue(ev);
-			return;
-		}
-		switch (t->stage) {
-		case 0:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
-		break;
-		case 1:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
-		break;
-		case 2:
-			vp_vec_pop(&t->block->owners);
-			vp_vec_append(&t->block->owners, orig);
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = t->node;
-			event_enqueue(ev);
-		break;
-		}
-	break;
+		single_copy_read_stage(t, 1);
+		return;
 	case WRITE:
-		dest = vp_vec_get(&t->block->owners, 0);
+		r = model_replica_first(t->model);
+		dest = r->node;
 		if (orig->id == dest->id) {
-			block_size_update(t->block, t->size);
-			ev = event_alloc(PULL_TASK, sim_time);
+			sim_ms = aggregate_into(orig, r);
+			ev = event_alloc(PULL_TASK, sim_time + sim_ms);
 			ev->data.n = orig;
 			event_enqueue(ev);
 			return;
 		}
 		switch (t->stage) {
 		case 0:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
+			flow_enqueue(orig->id, dest->id, 40, t);
 		break;
 		case 1:
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
+			flow_enqueue(dest->id, orig->id, r->nbytes, t);
 		break;
 		case 2:
-			block_size_update(t->block, t->size);
-			ev = event_alloc(STAGE_NEXT, sim_time);
+			sim_ms = aggregate_into(orig, r);
+			ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
 			ev->data.t = t;
 			event_enqueue(ev);
 		break;
 		case 3:
-			vp_vec_pop(&t->block->owners);
-			vp_vec_append(&t->block->owners, orig);
+			model_replica_relocate(r, orig);
 			ev = event_alloc(PULL_TASK, sim_time);
 			ev->data.n = t->node;
 			event_enqueue(ev);
@@ -389,14 +419,10 @@ void scm_stage(struct task *t)
 		}
 	break;
 	case TRAIN:
-		ev = event_alloc(PULL_TASK, sim_time + TRAIN_DEF_MS);
-		ev->data.n = t->node;
-		event_enqueue(ev);
-	break;
+		train_stage(t);
+		return;
 	case BARRIER:
-		ev = event_alloc(ROUND_BARRIER, sim_time + BARRIER_DEF_MS);
-		ev->data.t = t;
-		event_enqueue(ev);
+		barrier_stage(t);
 	break;
 	default:
 	break;
@@ -404,85 +430,37 @@ void scm_stage(struct task *t)
 	t->stage++;
 }
 
-struct node *shortest_path(const struct vp_vec *nl,
-	const struct node *orig,
-	const struct topology *t)
-{
-	struct node *min = NULL;
-	int hops, min_hops = INT_MAX;
-	struct node *aux;
-
-	vp_for (aux, nl) {
-		hops = path_hops(t, orig->id, aux->id);
-		//printf("hops: %d\n", hops);
-		if (hops < min_hops) {
-			min_hops = hops;
-			min = aux;
-		}
-	}
-	return min;
-}
-
 void mcm_stage(struct task *t)
 {
 	struct event *ev;
 	struct node *orig = t->node;
 	struct node *dest;
+	struct replica *own, *r2, *mine;
+	long long sim_ms;
 	switch (t->type) {
 	case READ:
-		// local
-		if (vp_vec_exists(&t->block->owners, orig)) {
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = orig;
-			event_enqueue(ev);
-			return;
-		}
-		dest = vp_vec_get(&t->block->owners, 0);
-		// remote
-		switch (t->stage) {
-		case 0:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
-		break;
-		case 1:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
-		break;
-		case 2:
-			vp_vec_append(&t->block->owners, orig);
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = t->node;
-			event_enqueue(ev);
-		break;
-		}
-	break;
+		multi_copy_read_stage(t);
+		return;
 	case WRITE:
-	// local
-		if (vp_vec_exists(&t->block->owners, orig)) {
+		own = model_replica_of(t->model, orig);
+		if (own) {
 			switch (t->stage) {
 			case 0:
-				vp_for (dest, &t->block->owners) {
-					if (dest->id == orig->id) {
+				vp_for (r2, &t->model->replicas) {
+					if (r2->node->id == orig->id) {
 						continue;
 					}
-					ev = event_alloc(FLOW_START, sim_time);
-					ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-					event_enqueue(ev);
+					flow_enqueue(orig->id, r2->node->id, 40, t);
 				}
 			break;
 			case 1:
-				block_size_update(t->block, t->size);
-				ev = event_alloc(STAGE_NEXT, sim_time);
+				sim_ms = aggregate_into(orig, own);
+				ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
 				ev->data.t = t;
 				event_enqueue(ev);
 			break;
 			case 2:
-				t->block->owners.length = 0;
-				vp_vec_append(&t->block->owners, orig);
+				model_replica_keep_only(t->model, own);
 				ev = event_alloc(PULL_TASK, sim_time);
 				ev->data.n = t->node;
 				event_enqueue(ev);
@@ -490,36 +468,33 @@ void mcm_stage(struct task *t)
 			}
 		break;
 		}
-	// remote
+		// remote: orig doesn't currently hold a copy
 		switch (t->stage) {
 		case 0:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
+			dest = nearest_replica(t->model, orig, &topology)->node;
+			flow_enqueue(orig->id, dest->id, 40, t);
 		break;
 		case 1:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
+			dest = nearest_replica(t->model, orig, &topology)->node;
+			flow_enqueue(dest->id, orig->id,
+				model_replica_of(t->model, dest)->nbytes, t);
 		break;
 		case 2:
-			vp_for (dest, &t->block->owners) {
-				ev = event_alloc(FLOW_START, sim_time);
-				ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-				event_enqueue(ev);
+			vp_for (r2, &t->model->replicas) {
+				flow_enqueue(orig->id, r2->node->id, 40, t);
 			}
 		break;
 		case 3:
-			block_size_update(t->block, t->size);
-			ev = event_alloc(STAGE_NEXT, sim_time);
+			mine = replica_dup(nearest_replica(t->model, orig, &topology), orig, sim_time);
+			vp_vec_append(&t->model->replicas, mine);
+			sim_ms = aggregate_into(orig, mine);
+			ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
 			ev->data.t = t;
 			event_enqueue(ev);
 		break;
 		case 4:
-			t->block->owners.length = 0;
-			vp_vec_append(&t->block->owners, orig);
+			own = model_replica_of(t->model, orig);
+			model_replica_keep_only(t->model, own);
 			ev = event_alloc(PULL_TASK, sim_time);
 			ev->data.n = t->node;
 			event_enqueue(ev);
@@ -527,14 +502,10 @@ void mcm_stage(struct task *t)
 		}
 	break;
 	case TRAIN:
-		ev = event_alloc(PULL_TASK, sim_time + TRAIN_DEF_MS);
-		ev->data.n = t->node;
-		event_enqueue(ev);
-	break;
+		train_stage(t);
+		return;
 	case BARRIER:
-		ev = event_alloc(ROUND_BARRIER, sim_time + BARRIER_DEF_MS);
-		ev->data.t = t;
-		event_enqueue(ev);
+		barrier_stage(t);
 	break;
 	}
 	t->stage++;
@@ -545,55 +516,34 @@ void mcu_stage(struct task *t)
 	struct event *ev;
 	struct node *orig = t->node;
 	struct node *dest;
+	struct replica *own, *r2, *mine;
+	long long sim_ms;
 	switch (t->type) {
 	case READ:
-	// local
-		if (vp_vec_exists(&t->block->owners, orig)) {
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = orig;
-			event_enqueue(ev);
-			return;
-		}
-		// remote
-		switch (t->stage) {
-		case 0:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
-		break;
-		case 1:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
-		break;
-		case 2:
-			vp_vec_append(&t->block->owners, orig);
-			ev = event_alloc(PULL_TASK, sim_time);
-			ev->data.n = t->node;
-			event_enqueue(ev);
-		break;
-		}
-	break;
+		multi_copy_read_stage(t);
+		return;
 	case WRITE:
-	// local
-		if (vp_vec_exists(&t->block->owners, orig)) {
+		own = model_replica_of(t->model, orig);
+		if (own) {
 			switch (t->stage) {
 			case 0:
-				block_size_update(t->block, t->size);
-				ev = event_alloc(STAGE_NEXT, sim_time);
+				sim_ms = aggregate_into(orig, own);
+				ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
 				ev->data.t = t;
 				event_enqueue(ev);
 			break;
 			case 1:
-				vp_for (dest, &t->block->owners) {
-					if (dest->id == orig->id) {
+				vp_for (r2, &t->model->replicas) {
+					if (r2->node->id == orig->id) {
 						continue;
 					}
-					ev = event_alloc(FLOW_START, sim_time);
-					ev->data.f = flow_alloc(orig->id, dest->id, t->block->size, t);
-					event_enqueue(ev);
+					flow_enqueue(orig->id, r2->node->id, own->nbytes, t);
+					free(r2->params);
+					r2->params = malloc(own->nbytes);
+					memcpy(r2->params, own->params, own->nbytes);
+					r2->nbytes = own->nbytes;
+					r2->version = own->version;
+					r2->stamp = own->stamp;
 				}
 			break;
 			case 2:
@@ -604,35 +554,41 @@ void mcu_stage(struct task *t)
 			}
 		break;
 		}
-	// remote
+		// remote: orig doesn't currently hold a copy
 		switch (t->stage) {
 		case 0:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(orig->id, dest->id, 40, t);
-			event_enqueue(ev);
+			dest = nearest_replica(t->model, orig, &topology)->node;
+			flow_enqueue(orig->id, dest->id, 40, t);
 		break;
 		case 1:
-			dest = shortest_path(&t->block->owners, orig, &topology);
-			ev = event_alloc(FLOW_START, sim_time);
-			ev->data.f = flow_alloc(dest->id, orig->id, t->block->size, t);
-			event_enqueue(ev);
+			dest = nearest_replica(t->model, orig, &topology)->node;
+			flow_enqueue(dest->id, orig->id,
+				model_replica_of(t->model, dest)->nbytes, t);
 		break;
-		case 3:
-			block_size_update(t->block, t->size);
-			ev = event_alloc(STAGE_NEXT, sim_time);
+		case 2:
+			mine = replica_dup(nearest_replica(t->model, orig, &topology), orig, sim_time);
+			vp_vec_append(&t->model->replicas, mine);
+			sim_ms = aggregate_into(orig, mine);
+			ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
 			ev->data.t = t;
 			event_enqueue(ev);
 		break;
-		case 2:
-			vp_for (dest, &t->block->owners) {
-				ev = event_alloc(FLOW_START, sim_time);
-				ev->data.f = flow_alloc(orig->id, dest->id, t->block->size, t);
-				event_enqueue(ev);
+		case 3:
+			mine = model_replica_of(t->model, orig);
+			vp_for (r2, &t->model->replicas) {
+				if (r2->node->id == orig->id) {
+					continue;
+				}
+				flow_enqueue(orig->id, r2->node->id, mine->nbytes, t);
+				free(r2->params);
+				r2->params = malloc(mine->nbytes);
+				memcpy(r2->params, mine->params, mine->nbytes);
+				r2->nbytes = mine->nbytes;
+				r2->version = mine->version;
+				r2->stamp = mine->stamp;
 			}
 		break;
 		case 4:
-			vp_vec_append(&t->block->owners, orig);
 			ev = event_alloc(PULL_TASK, sim_time);
 			ev->data.n = t->node;
 			event_enqueue(ev);
@@ -640,14 +596,10 @@ void mcu_stage(struct task *t)
 		}
 	break;
 	case TRAIN:
-		ev = event_alloc(PULL_TASK, sim_time + TRAIN_DEF_MS);
-		ev->data.n = t->node;
-		event_enqueue(ev);
-	break;
+		train_stage(t);
+		return;
 	case BARRIER:
-		ev = event_alloc(ROUND_BARRIER, sim_time + BARRIER_DEF_MS);
-		ev->data.t = t;
-		event_enqueue(ev);
+		barrier_stage(t);
 	break;
 	}
 	t->stage++;
@@ -685,7 +637,7 @@ void event_print(const struct event *ev)
 			dbg("NEW TASK | remaining %3d ]\n",
 			ev->data.n->task_queue.length);
 		}
-		
+
 		break;
 		case STAGE_NEXT:
 			if (ev->data.t->type == 0) {
@@ -697,8 +649,8 @@ void event_print(const struct event *ev)
 			} else {
 				str = "T";
 			}
-			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | block %3d ]\n",
-				sim_time, ev->id, ev->data.t->id, str, ev->data.t->stage, ev->data.t->node->id, ev->data.t->block->id);
+			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | model %3d ]\n",
+				sim_time, ev->id, ev->data.t->id, str, ev->data.t->stage, ev->data.t->node->id, ev->data.t->model->id);
 		break;
 		case FLOW_START:
 			f = ev->data.f;
@@ -712,9 +664,9 @@ void event_print(const struct event *ev)
 			} else {
 				str = "T";
 			}
-			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | block %3d | FLOW %2d STA %2d  -> %2d | %ldB ]\n",
-				sim_time, ev->id, t->id, str, t->stage, t->node->id, t->block->id,
-				f->id, orig->orig, dest->dest, f->nbytes);	
+			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | model %3d | FLOW %2d STA %2d  -> %2d | %ldB ]\n",
+				sim_time, ev->id, t->id, str, t->stage, t->node->id, t->model->id,
+				f->id, orig->orig, dest->dest, f->nbytes);
 			path_dbg(&f->path);
 		break;
 		case FLOW_FINISH:
@@ -729,8 +681,8 @@ void event_print(const struct event *ev)
 			} else {
 				str = "T";
 			}
-			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | block %3d | FLOW %2d END %2d  -> %2d | %ldB | %ld + %ldms ]\n",
-				sim_time, ev->id, t->id, str, t->stage, t->node->id, t->block->id,
+			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | model %3d | FLOW %2d END %2d  -> %2d | %ldB | %ld + %ldms ]\n",
+				sim_time, ev->id, t->id, str, t->stage, t->node->id, t->model->id,
 				f->id, orig->orig, dest->dest, f->nbytes, f->start_time, f->makespan);
 		break;
 	}
@@ -742,7 +694,7 @@ void round_barrier(struct event *ev)
 	struct task *t;
 	struct event *new;
 	static int node_count = 0;
-	
+
 	node_count++;
 	if (node_count >= nodes.length) {
 		node_count = 0;
@@ -772,7 +724,7 @@ void event_process(struct event *ev)
 
 	struct event *new;
 	event_print(ev);
-	
+
 	switch (ev->type) {
 	case ROUND_BARRIER:
 		round_barrier(ev);
@@ -783,13 +735,12 @@ void event_process(struct event *ev)
 			break;
 		}
 #ifdef USE_VP_LIST
-		//t = vp_list_remove_at(&n->task_queue, n->task_queue.first);
 		t = vp_list_remove_at(&n->task_queue, n->task_queue.first);
 #else
 		t = vp_vec_remove(&n->task_queue, 0);
 #endif
 		n->current_task = t;
-		
+
 		new = event_alloc(STAGE_NEXT, sim_time);
 		new->data.t = t;
 		event_enqueue(new);
@@ -812,7 +763,7 @@ void event_process(struct event *ev)
 		case FLOW_DEBUG:
 			flow_dbg(ev->data.t);
 		break;
-		
+
 		default:
 			break;
 		}
@@ -826,97 +777,70 @@ void event_process(struct event *ev)
 	}
 }
 
-void event_loop(struct vp_vec *node_list,
-#ifdef USE_VP_LIST_QUEUE
-				struct vp_list *ev_queue)
-#else
-				struct vp_vec *ev_queue)
-#endif
+void event_loop(struct vp_vec *node_list, struct vp_heap *ev_queue)
 {
 	struct event *ev;
-	
+
+	ev_queue->cmp = event_cmp;
 	dispatcher_init(node_list);
 	while (ev_queue->length > 0) {
-#ifdef USE_VP_LIST_QUEUE
-		ev = vp_list_remove_at(ev_queue, ev_queue->first);
-#else
-		ev = vp_vec_remove(ev_queue, 0);
-#endif
+		ev = vp_heap_pop(ev_queue);
+		if (ev->stale) {			/* lazy invalidation: superseded */
+			event_free(ev);
+			continue;
+		}
 		sim_time = ev->dispatch_time;
-		
+
 		event_process(ev);
 		event_free(ev);
 	}
-}
-
-void flow_debug(struct config *cfg, struct vp_vec *tasks)
-{
-	struct task *t;
-	
-	///////////////
-	t = vp_vec_get(tasks, 0);
-	t->node = vp_vec_get(&nodes, 0);
-	t->block = vp_vec_get(&blocks, 3);
-	t->type = READ;
-	
-	///////////////
-	t = vp_vec_get(tasks, 1);
-	t->node = vp_vec_get(&nodes, 1);
-	t->block = vp_vec_get(&blocks, 0);
-	t->type = TRAIN;
-
-	t = vp_vec_get(tasks, 2);
-	t->node = vp_vec_get(&nodes, 1);
-	t->block = vp_vec_get(&blocks, 4);
-	t->type = READ;
-
-	///////////////
-	t = vp_vec_get(tasks, 3);
-	t->node = vp_vec_get(&nodes, 2);
-	t->block = vp_vec_get(&blocks, 0);
-	t->type = TRAIN;
-
-	t = vp_vec_get(tasks, 4);
-	t->node = vp_vec_get(&nodes, 2);
-	t->block = vp_vec_get(&blocks, 0);
-	t->type = TRAIN;
-	
-	t = vp_vec_get(tasks, 5);
-	t->node = vp_vec_get(&nodes, 2);
-	t->block = vp_vec_get(&blocks, 5);
-	t->type = READ;
 }
 
 void wl_virt_rounds(struct vp_vec *tl)
 {
 	struct topology *aux = topology.virt_topo;
 	while (aux) {
-		workload_gen(tl, &nodes, &blocks, aux, 1);
+		workload_gen(tl, &nodes, &models, aux, 1);
 		aux = aux->virt_topo;
 	}
 }
 
-struct config config;
+/*
+ * Creates the initial replica for every node's own model via the backend's
+ * "init" op. Assumes the 1:1 node<->model assignment that gen_nodes leaves
+ * behind under main()'s hardcoded one-model-per-node call — if that call
+ * ever changes, this loop needs to change with it.
+ */
+void models_init_replicas(struct vp_vec *nl, struct vp_vec *ml)
+{
+	struct node *n;
+	struct model *m;
+	void *params;
+	size_t nbytes;
+	id_t nshards = config.nshards > 0 ? (id_t) config.nshards : (id_t) nl->length;
+
+	vp_for (n, nl) {
+		m = vp_vec_get(ml, n->id);
+		if (!m) continue;
+		if (backend_init(n->id, config.model_name, n->id, nshards,
+				(unsigned int) config.seed, config.ms_per_epoch,
+				&params, &nbytes) < 0) {
+			fprintf(stderr, "backend_init failed for node %u\n", n->id);
+			exit(1);
+		}
+		vp_vec_append(&m->replicas, replica_alloc(m, n, params, nbytes, 0, sim_time));
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	struct vp_vec tasks;
-
-	long long makespan;
 	time_t sta, end;
-	
+
 	if (argc < 3) {
 		fprintf(stderr, "usage: %s [topol_fname] [config_fname]\n", argv[0]);
 	}
 	load_config(argv[2], &config);
-	/*
-	args_parse(&config, argc, argv);
-	if (config.dir_mode == DIR_GLOBAL) {
-		global_directory = 1;
-	} else {
-		global_directory = 0;
-	}
-	policy = (enum policy_t) config.policy;
-	*/
 	policy = config.policy;
 	if (config.debug[0]) {
 		debug = fopen(config.debug, "w");
@@ -928,43 +852,37 @@ int main(int argc, char *argv[])
 	} else {
 		result = stdout;
 	}
+	if (!config.backend_cmd[0]) {
+		fprintf(stderr, "config: backend_cmd is required (path to the training backend)\n");
+		return 1;
+	}
+	if (backend_spawn(config.backend_cmd) < 0) {
+		fprintf(stderr, "failed to spawn backend '%s'\n", config.backend_cmd);
+		return 1;
+	}
 
-	vp_vec_alloc(&blocks, 512);
+	vp_vec_alloc(&models, 512);
 	vp_vec_alloc(&tasks, 512);
 	vp_vec_alloc(&nodes, 512);
-	//vp_list_alloc(&event_queue, 200000);
-	
-	//topo_read(config.topol_fname, &topology);
+
 	topology.directed = 0;
-	int rtopol = topo_multi_read(argv[1], &topology);
-	//dbg("topol_read done (%d topologies)\n", rtopol);
+	topo_multi_read(argv[1], &topology);
 	dbg("%s %s\n", argv[0], argv[1]);
-	sta = clock();
 	dijkstra_init(&topology);
-	end = clock();
-	//out("dijkstra time: %ldms\n", (end - sta)/(CLOCKS_PER_SEC/1000));
-	//dist_cache_print();
-	//struct vp_vec path = {0};
-	//path_resolve(&topology, 5, 2, &path);
-	
+
 	gen_init(config.seed);
-	gen_blocks(&blocks, config.blocks_per_node * topology.num_nodes, 1, config.block_size);
-	//gen_nodes(&nodes, &blocks, topology.num_nodes, config.n_groups, config.dir_mode, config.blocks_per_node);
-	gen_nodes(&nodes, &blocks, topology.num_nodes, 1, 0, 1);
+	gen_models(&models, config.blocks_per_node * topology.num_nodes, 1, config.block_size);
+	gen_nodes(&nodes, &models, topology.num_nodes, 1, 0, 1);
+	models_init_replicas(&nodes, &models);
 	gen_init(config.seed);
-	//gen_tasks_groups(&tasks, &blocks, &nodes, config.n_events);
-	//workload_gen(&tasks, &nodes, &blocks, &topology, config.n_events);
 	wl_virt_rounds(&tasks);
 
-	// makespan = dispatcher(&nodes, &blocks, &events);
-	//flow_debug(&config, &tasks);
 	tasks_enqueue(&tasks);
 	dbg("-- SIMULATION START --\n");
 	sta = clock();
 	event_loop(&nodes, &event_queue);
 	end = clock();
 
-	//out("exec time: %ld\n", (end - sta)/(CLOCKS_PER_SEC/1000));
 	switch (policy) {
 	case S_COPY_UPD:
 		out("SCU (0): ");
@@ -978,14 +896,15 @@ int main(int argc, char *argv[])
 	case M_COPY_UPD:
 		out("MCU (3): ");
 	break;
+	default:
+	break;
 	}
 	out("%ld %ld\n", sim_time, (end - sta)/(CLOCKS_PER_SEC/1000));
-	//log_results(&tasks, &nodes, makespan);
 
+	backend_shutdown();
 	tasks_free(&tasks);
-	blocks_free(&blocks);
+	models_free(&models);
 	nodes_free(&nodes);
-	//operations_free(&events);
 	topo_free(&topology);
 	if (config.output[0]) {
 		fclose(result);

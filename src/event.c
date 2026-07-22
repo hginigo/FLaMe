@@ -1,11 +1,8 @@
 #include "event.h"
 #include "structs.h"
+#include "vp_heap.h"
 
-#ifdef USE_VP_LIST_QUEUE
-extern struct vp_list event_queue;
-#else
-extern struct vp_vec event_queue;
-#endif
+extern struct vp_heap event_queue;
 
 struct event *event_alloc(enum event_t type, time_t disp_time)
 {
@@ -17,6 +14,7 @@ struct event *event_alloc(enum event_t type, time_t disp_time)
 	ev->type = type;
 	ev->dispatch_time = disp_time;
 	ev->id = id_count++;
+	ev->stale = 0;
 	return ev;
 }
 
@@ -25,31 +23,17 @@ void event_free(struct event *ev)
 	free(ev);
 }
 
+/* Min-heap order: earliest dispatch_time pops first. */
+int event_cmp(const void *a, const void *b)
+{
+	const struct event *ea = a;
+	const struct event *eb = b;
+	if (ea->dispatch_time < eb->dispatch_time) return -1;
+	if (ea->dispatch_time > eb->dispatch_time) return 1;
+	return 0;
+}
+
 void event_enqueue(struct event *ev)
 {
-	const struct event *aux;
-	//printf("event enqueue\n");
-
-#ifdef USE_VP_LIST_QUEUE
-	for (struct vp_list_node *i = event_queue.first; i != NULL && i->status != VP_LIST_NODE_FREE; i = i->next) {
-		aux = i->item;
-#else
-	for (size_t i = 0; i < event_queue.length; i++) {
-		aux = vp_vec_get(&event_queue, i);
-#endif
-		if (aux->dispatch_time > ev->dispatch_time) {
-			//printf("event insert\n");
-#ifdef USE_VP_LIST_QUEUE
-			i = vp_list_insert_before(&event_queue, ev, i);
-#else
-			vp_vec_insert(&event_queue, ev, i);
-#endif
-			return;
-		}
-	}
-#ifdef USE_VP_LIST_QUEUE
-	vp_list_append(&event_queue, ev);
-#else
-	vp_vec_append(&event_queue, ev);
-#endif
+	vp_heap_push(&event_queue, ev);
 }
