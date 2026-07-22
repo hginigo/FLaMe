@@ -2,11 +2,13 @@
 #include "topology.h"
 #include "vp_vec.h"
 #include "event.h"
+#include "config.h"
 #include <string.h>
 #include <limits.h>
 
 extern struct topology topology;
 extern time_t sim_time;
+extern struct config config;
 
 void path_attach_flow(struct vp_vec *path, struct flow *f)
 {
@@ -130,9 +132,16 @@ struct flow *flow_alloc(id_t orig,
 	f->nbytes = nbytes;
 	f->t = t;
 	f->id = flow_id++;
-	path_resolve(&topology, orig, dest, &f->path);
-	if (!topology.directed) {
-		path_resolve(&topology, dest, orig, &f->path_aux);
+	if (config.routing == ROUTING_DYNAMIC) {
+		path_resolve_dynamic(&topology, orig, dest, &f->path);
+		if (!topology.directed) {
+			path_resolve_dynamic(&topology, dest, orig, &f->path_aux);
+		}
+	} else {
+		path_resolve(&topology, orig, dest, &f->path);
+		if (!topology.directed) {
+			path_resolve(&topology, dest, orig, &f->path_aux);
+		}
 	}
 	return f;
 }
@@ -158,7 +167,7 @@ void flow_enqueue(id_t orig, id_t dest, size_t nbytes, struct task *t)
 {
 	struct flow *f = flow_alloc(orig, dest, nbytes, t);
 	struct event *ev = event_alloc(FLOW_START,
-		sim_time + path_latency(&topology, orig, dest));
+		sim_time + path_vec_latency(&f->path));
 	ev->data.f = f;
 	event_enqueue(ev);
 }

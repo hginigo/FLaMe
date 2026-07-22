@@ -33,9 +33,24 @@ void path_resolve(const struct topology *t,
 int path_hops(const struct topology *t,
     id_t orig,
     id_t dest);
-int path_latency(const struct topology *t,
+
+/*
+ * Ad-hoc single-pair path search, run fresh (no cache) at flow-creation
+ * time: edge cost is 1 + the link's current active_flows count, so the
+ * search routes around whatever is contended right now instead of always
+ * taking the static hop-count-shortest path. Same predecessor-from-dest,
+ * walk-forward-from-orig convention as path_resolve.
+ */
+void path_resolve_dynamic(const struct topology *t,
     id_t orig,
-    id_t dest);
+    id_t dest,
+    struct vp_vec *path);
+
+/* Sum of ->latency over an already-resolved path (e.g. flow->path). Use
+ * this instead of re-deriving a path from (orig, dest) so latency always
+ * matches whichever path was actually chosen, static or dynamic. */
+int path_vec_latency(const struct vp_vec *path);
+
 int topo_multi_read(char *str, struct topology *t);
 
 #endif // _TOPOLOGY_H

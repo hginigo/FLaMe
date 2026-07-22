@@ -4,6 +4,11 @@
 #define MAX_LINE_LEN 256
 #define MAX_VAL_LEN  128
 
+enum routing_mode {
+    ROUTING_STATIC = 0,   /* precomputed once at startup, hop-count shortest path */
+    ROUTING_DYNAMIC = 1,  /* resolved per-flow from current link contention */
+};
+
 struct config {
     int   block_size;
     int   topology_directed;   /* 1 = on, 0 = off */
@@ -19,6 +24,9 @@ struct config {
     int   nshards;               /* dataset partitions; defaults to node count */
     long long ms_per_epoch;      /* advisory hint passed to the backend at init */
     int   latency_ms;            /* default per-link propagation delay; .tpl lines may override */
+    enum routing_mode routing;  /* ROUTING_STATIC (default): hop-count path precomputed once
+                                    at startup. ROUTING_DYNAMIC: each flow resolves its path
+                                    ad-hoc from current link contention. */
 };
 
 int load_config(const char *path, struct config *cfg);
