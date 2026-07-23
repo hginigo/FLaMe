@@ -302,16 +302,19 @@ static int link_route_cost(const struct link *l)
 /*
  * Same predecessor-from-dest / walk-forward-from-orig shape as
  * path_resolve, but run fresh against the live graph instead of
- * dist_cache, and costed by link_route_cost() (sum of 1/bandwidth per
- * hop) instead of a flat 1 per hop, so the search steers toward
- * currently-fast, uncontended links instead of always taking the static
- * hop-count-shortest path. Early-exits once orig itself is finalized,
- * since this is a single-pair query, not an all-pairs precompute.
+ * dist_cache, and costed by link_route_cost() (1/bandwidth per hop) plus a
+ * fixed `hop_penalty` per hop, instead of a flat 1 per hop, so the search
+ * steers toward currently-fast, uncontended links. hop_penalty == 0 is pure
+ * contention routing; a larger value prices each extra hop and makes the
+ * search prefer shorter paths, degenerating toward static hop-count routing
+ * as it grows. Early-exits once orig itself is finalized, since this is a
+ * single-pair query, not an all-pairs precompute.
  */
 void path_resolve_dynamic(const struct topology *t,
     id_t orig,
     id_t dest,
-    struct vp_vec *path)
+    struct vp_vec *path,
+    int hop_penalty)
 {
     size_t n_nodes = t->num_nodes;
     int *dists = malloc(n_nodes * sizeof(int));
@@ -349,6 +352,8 @@ void path_resolve_dynamic(const struct topology *t,
         for (size_t i = 0; i < adj_list->length; i++) {
             aux_link = vp_vec_get(adj_list, i);
             cost = link_route_cost(aux_link);
+            /* add the fixed per-hop penalty, saturating instead of overflowing */
+            cost = cost < INT_MAX - hop_penalty ? cost + hop_penalty : INT_MAX;
             if (dists[aux_link->dest] > dists[pivot] + cost) {
                 dists[aux_link->dest] = dists[pivot] + cost;
                 pred[aux_link->dest] = (int) pivot;
@@ -380,28 +385,41 @@ void path_resolve_dynamic(const struct topology *t,
 }
 
 /*
- * Fixed-point corresp_bw of `l`: the bandwidth share a newcomer flow would
- * get once it joins (l->weight / (active_flows.length + 1)), scaled by
- * ROUTE_COST_SCALE for precision -- same quantity link_route_cost() inverts
- * into a cost, but here larger is better (more bandwidth), so it feeds a
- * widest-path (bottleneck-maximizing) search instead of a shortest-path one.
+ * corresp_bw of `l` in raw B/ms: the bandwidth share a newcomer flow would
+ * get once it joins (l->weight / (active_flows.length + 1); l->weight is
+ * already Bpms-scaled). Larger is better -- it feeds a widest-path
+ * (bottleneck-maximizing) search instead of a shortest-path one. Unlike
+ * link_route_cost this is NOT ROUTE_COST_SCALE-scaled: weight >> flow count
+ * so there is no floor-to-zero risk, and keeping it in real B/ms both avoids
+ * the INT_MAX saturation that used to make all uncontended links look equal
+ * and puts it on a scale where path_resolve_widest's hop_penalty (also in
+ * B/ms of bottleneck given up per hop) is a meaningful knob.
  */
 static int link_bandwidth(const struct link *l)
 {
-    long long numer, bw;
-
     if (l->weight <= 0) {
         return 0;
     }
-    numer = (long long) l->weight * ROUTE_COST_SCALE;
-    bw = numer / (l->active_flows.length + 1);
-    return bw > INT_MAX ? INT_MAX : (int) bw;
+    return l->weight / (int) (l->active_flows.length + 1);
 }
 
+/*
+ * Widest-path search: maximize the path's bottleneck bandwidth (min
+ * corresp_bw across hops), the same quantity path_min_bw() computes once the
+ * flow attaches. hop_penalty subtracts a fixed B/ms from the running
+ * bottleneck at every hop, so a longer path's effective width is discounted
+ * -- the widest-path analog of the additive penalty path_resolve_dynamic
+ * uses. penalty 0 is pure widest; a large penalty makes hop count dominate
+ * and degenerates toward shortest-path routing. Because the penalty can push
+ * the running value negative, unreached nodes use INT_MIN (not -1) as the
+ * "no path yet" sentinel. Same predecessor-from-dest / walk-forward-from-orig
+ * convention as the other resolvers.
+ */
 void path_resolve_widest(const struct topology *t,
     id_t orig,
     id_t dest,
-    struct vp_vec *path)
+    struct vp_vec *path,
+    int hop_penalty)
 {
     size_t n_nodes = t->num_nodes;
     int *dists = malloc(n_nodes * sizeof(int));
@@ -414,7 +432,7 @@ void path_resolve_widest(const struct topology *t,
     int bw, cand;
 
     for (size_t i = 0; i < n_nodes; i++) {
-        dists[i] = -1;
+        dists[i] = INT_MIN;
         pred[i] = -1;
     }
     dists[dest] = INT_MAX;
@@ -439,7 +457,9 @@ void path_resolve_widest(const struct topology *t,
         for (size_t i = 0; i < adj_list->length; i++) {
             aux_link = vp_vec_get(adj_list, i);
             bw = link_bandwidth(aux_link);
+            /* bottleneck so far, then discount this hop */
             cand = bw < dists[pivot] ? bw : dists[pivot];
+            cand -= hop_penalty;
             if (cand > dists[aux_link->dest]) {
                 dists[aux_link->dest] = cand;
                 pred[aux_link->dest] = (int) pivot;

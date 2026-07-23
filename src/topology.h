@@ -36,27 +36,34 @@ int path_hops(const struct topology *t,
 
 /*
  * Ad-hoc single-pair path search, run fresh (no cache) at flow-creation
- * time: edge cost is 1 + the link's current active_flows count, so the
- * search routes around whatever is contended right now instead of always
- * taking the static hop-count-shortest path. Same predecessor-from-dest,
- * walk-forward-from-orig convention as path_resolve.
+ * time: edge cost is link_route_cost() (1/bw for a newcomer flow) plus a
+ * fixed `hop_penalty` per hop, so the search routes around what is contended
+ * now instead of always taking the static hop-count-shortest path. Same
+ * predecessor-from-dest, walk-forward-from-orig convention as path_resolve.
+ * hop_penalty == 0 is pure contention routing (ROUTING_DYNAMIC); a large
+ * penalty makes length dominate and degenerates toward static hop-count
+ * routing (ROUTING_HYBRID with a tunable knob between the two).
  */
 void path_resolve_dynamic(const struct topology *t,
     id_t orig,
     id_t dest,
-    struct vp_vec *path);
+    struct vp_vec *path,
+    int hop_penalty);
 
 /*
  * Widest-path variant of path_resolve_dynamic: instead of minimizing the sum
  * of 1/bw over the path, it maximizes the path's bottleneck bandwidth (the
  * min corresp_bw across hops) -- i.e. the same quantity path_min_bw() will
- * compute once the flow is attached. Same predecessor-from-dest,
- * walk-forward-from-orig convention as path_resolve/path_resolve_dynamic.
+ * compute once the flow is attached. hop_penalty subtracts a fixed B/ms from
+ * the running bottleneck per hop (widest-path analog of the dynamic penalty):
+ * 0 is pure widest, a large value degenerates toward shortest-path. Same
+ * predecessor-from-dest, walk-forward-from-orig convention as path_resolve.
  */
 void path_resolve_widest(const struct topology *t,
     id_t orig,
     id_t dest,
-    struct vp_vec *path);
+    struct vp_vec *path,
+    int hop_penalty);
 
 /*
  * Build path_aux as the exact physical reverse of an already-resolved path

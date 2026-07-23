@@ -141,9 +141,13 @@ struct flow *flow_alloc(id_t orig,
 	f->t = t;
 	f->id = flow_id++;
 	if (config.routing == ROUTING_DYNAMIC) {
-		path_resolve_dynamic(&topology, orig, dest, &f->path);
+		path_resolve_dynamic(&topology, orig, dest, &f->path, 0);
+	} else if (config.routing == ROUTING_HYBRID) {
+		path_resolve_dynamic(&topology, orig, dest, &f->path, config.hop_penalty);
 	} else if (config.routing == ROUTING_WIDEST) {
-		path_resolve_widest(&topology, orig, dest, &f->path);
+		path_resolve_widest(&topology, orig, dest, &f->path, 0);
+	} else if (config.routing == ROUTING_WIDEST_HYBRID) {
+		path_resolve_widest(&topology, orig, dest, &f->path, config.hop_penalty);
 	} else {
 		path_resolve(&topology, orig, dest, &f->path);
 	}
