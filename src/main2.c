@@ -16,6 +16,7 @@
 #include "flow.h"
 #include "backend.h"
 #include "policy.h"
+#include "metrics.h"
 #define VP_VEC_IMPLEMENTATION
 #include "vp_vec.h"
 #define VP_LIST_IMPLEMENTATION
@@ -29,8 +30,9 @@ struct vp_vec models;
 struct vp_heap event_queue = {0};
 time_t sim_time;
 enum policy_t policy;
-long long total_hops = 0;
 struct config config;
+struct metric metric_flow_hops;
+struct metric metric_link_contention;
 
 
 void tasks_enqueue(struct vp_vec *task_list)
@@ -54,9 +56,9 @@ void flow_start(const struct event *ev)
 
 	f->start_time = sim_time;
 	f->prev_ts = sim_time;
-	path_attach_flow(&f->path, f);
+	path_attach_flow(&f->path, f, 1);
 	if (!topology.directed) {
-		path_attach_flow(&f->path_aux, f);
+		path_attach_flow(&f->path_aux, f, 0);
 	}
 	f->min_bw = path_min_bw(&f->path);
 	f->makespan = f->nbytes / (f->min_bw);
@@ -77,9 +79,9 @@ void flow_finish(const struct event *ev)
 	struct task *t = f->t;
 	struct event *stage_next;
 
-	path_detach_flow(&f->path, f);
+	path_detach_flow(&f->path, f, 1);
 	if (!topology.directed) {
-		path_detach_flow(&f->path_aux, f);
+		path_detach_flow(&f->path_aux, f, 0);
 	}
 	flows_reschedule(f);
 
@@ -372,11 +374,17 @@ int main(int argc, char *argv[])
 	gen_init(config.seed);
 	wl_virt_rounds(&tasks);
 
+	metric_init(&metric_flow_hops, "flow_hops");
+	metric_init(&metric_link_contention, "link_contention");
+
 	tasks_enqueue(&tasks);
 	dbg("-- SIMULATION START --\n");
 	sta = clock();
 	event_loop(&nodes, &event_queue);
 	end = clock();
+
+	metric_print(&metric_flow_hops);
+	metric_print(&metric_link_contention);
 
 	if (policy_name(policy)) {
 		out("%s (%d): ", policy_name(policy), (int) policy);

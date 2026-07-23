@@ -58,6 +58,17 @@ void path_resolve_widest(const struct topology *t,
     id_t dest,
     struct vp_vec *path);
 
+/*
+ * Build path_aux as the exact physical reverse of an already-resolved path
+ * (reverse-direction link object of each hop, in reverse order). For
+ * undirected topologies only, where a flow contends on both directions of
+ * every physical edge it crosses; derived from path so the two stay
+ * symmetric, which an independent reverse search does not guarantee.
+ */
+void path_reverse(const struct topology *t,
+    const struct vp_vec *path,
+    struct vp_vec *path_aux);
+
 /* Sum of ->latency over an already-resolved path (e.g. flow->path). Use
  * this instead of re-deriving a path from (orig, dest) so latency always
  * matches whichever path was actually chosen, static or dynamic. */

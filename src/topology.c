@@ -237,6 +237,35 @@ int path_hops(const struct topology *t,
     return hops;
 }
 
+/*
+ * Build path_aux as the exact physical reverse of an already-resolved path:
+ * walk path backwards and, for each hop's link (X -> Y), append the
+ * reverse-direction link object (Y -> X) found in adj_lists[Y]. Used for
+ * undirected topologies, where a flow must register contention on both
+ * directions of every physical edge it crosses. Deriving path_aux this way
+ * keeps it perfectly symmetric with path (identical physical edges), which
+ * an independent second path search does NOT guarantee once shortest-path
+ * ties or contention differences let the two searches pick different routes.
+ */
+void path_reverse(const struct topology *t,
+    const struct vp_vec *path,
+    struct vp_vec *path_aux)
+{
+    struct link *l, *rev;
+    struct vp_vec *adj_list;
+
+    for (size_t i = path->length; i-- > 0; ) {
+        l = vp_vec_get(path, i);
+        adj_list = &t->adj_lists[l->dest];
+        vp_for (rev, adj_list) {
+            if (rev->dest == l->orig) {
+                vp_vec_append(path_aux, rev);
+                break;
+            }
+        }
+    }
+}
+
 int path_vec_latency(const struct vp_vec *path)
 {
     struct link *l;

@@ -3,22 +3,28 @@
 #include "vp_vec.h"
 #include "event.h"
 #include "config.h"
+#include "metrics.h"
 #include <string.h>
 #include <limits.h>
 
 extern struct topology topology;
 extern time_t sim_time;
 extern struct config config;
+extern struct metric metric_flow_hops;
+extern struct metric metric_link_contention;
 
-void path_attach_flow(struct vp_vec *path, struct flow *f)
+void path_attach_flow(struct vp_vec *path, struct flow *f, int record)
 {
 	struct link *l;
 	vp_for (l, path) {
 		vp_vec_append(&l->active_flows, f);
+		if (record) {
+			metric_observe(&metric_link_contention, (long long) l->active_flows.length);
+		}
 	}
 }
 
-void path_detach_flow(struct vp_vec *path, struct flow *f)
+void path_detach_flow(struct vp_vec *path, struct flow *f, int record)
 {
 	struct link *l;
 	int ind;
@@ -26,6 +32,9 @@ void path_detach_flow(struct vp_vec *path, struct flow *f)
 		ind = vp_vec_index(&l->active_flows, f);
 		assert(ind > -1);
 		vp_vec_remove(&l->active_flows, (size_t) ind);
+		if (record) {
+			metric_observe(&metric_link_contention, (long long) l->active_flows.length);
+		}
 	}
 }
 
@@ -127,26 +136,25 @@ struct flow *flow_alloc(id_t orig,
 	struct flow *f = malloc(sizeof(struct flow));
 	assert(f != NULL);
 	memset(f, 0, sizeof(struct flow));
-	dbg("%u -> %u\n", orig, dest);
-	
+
 	f->nbytes = nbytes;
 	f->t = t;
 	f->id = flow_id++;
 	if (config.routing == ROUTING_DYNAMIC) {
 		path_resolve_dynamic(&topology, orig, dest, &f->path);
-		if (!topology.directed) {
-			path_resolve_dynamic(&topology, dest, orig, &f->path_aux);
-		}
 	} else if (config.routing == ROUTING_WIDEST) {
 		path_resolve_widest(&topology, orig, dest, &f->path);
-		if (!topology.directed) {
-			path_resolve_widest(&topology, dest, orig, &f->path_aux);
-		}
 	} else {
 		path_resolve(&topology, orig, dest, &f->path);
-		if (!topology.directed) {
-			path_resolve(&topology, dest, orig, &f->path_aux);
-		}
+	}
+	/*
+	 * Undirected edges are shared half-duplex: a flow must also occupy the
+	 * reverse-direction link of every physical hop it crosses. Derive that
+	 * reverse from f->path rather than searching again, so path_aux is
+	 * guaranteed to be its exact mirror (see path_reverse).
+	 */
+	if (!topology.directed) {
+		path_reverse(&topology, &f->path, &f->path_aux);
 	}
 	return f;
 }
@@ -173,6 +181,7 @@ void flow_enqueue(id_t orig, id_t dest, size_t nbytes, struct task *t)
 	struct flow *f = flow_alloc(orig, dest, nbytes, t);
 	struct event *ev = event_alloc(FLOW_START,
 		sim_time + path_vec_latency(&f->path));
+	metric_observe(&metric_flow_hops, (long long) f->path.length);
 	ev->data.f = f;
 	event_enqueue(ev);
 }
