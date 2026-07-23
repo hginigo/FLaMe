@@ -121,6 +121,15 @@ static int pq_cmp(const void *a, const void *b)
     return 0;
 }
 
+/* Reverse of pq_cmp: vp_heap is a min-heap by cmp, so this makes it pop the
+ * largest ->weight first -- used by path_resolve_widest, where ->weight
+ * holds a running bottleneck bandwidth and the search must always finalize
+ * whichever frontier node currently has the widest guaranteed path. */
+static int pq_cmp_max(const void *a, const void *b)
+{
+    return pq_cmp(b, a);
+}
+
 int **dist_cache;
 size_t num_nodes;
 
@@ -315,6 +324,97 @@ void path_resolve_dynamic(const struct topology *t,
                 dists[aux_link->dest] = dists[pivot] + cost;
                 pred[aux_link->dest] = (int) pivot;
                 d2 = link_alloc(0, aux_link->dest, dists[aux_link->dest], 0);
+                vp_heap_push(&pq, d2);
+            }
+        }
+    }
+    while (pq.length > 0) {
+        d = vp_heap_pop(&pq);
+        dist_free(d);
+    }
+    vp_heap_free(&pq);
+
+    pivot = orig;
+    while (pivot != dest) {
+        adj_list = &t->adj_lists[pivot];
+        vp_for (aux_link, adj_list) {
+            if (aux_link->dest == (id_t) pred[pivot]) {
+                vp_vec_append(path, aux_link);
+            }
+        }
+        pivot = (id_t) pred[pivot];
+    }
+
+    free(dists);
+    free(pred);
+    free(done);
+}
+
+/*
+ * Fixed-point corresp_bw of `l`: the bandwidth share a newcomer flow would
+ * get once it joins (l->weight / (active_flows.length + 1)), scaled by
+ * ROUTE_COST_SCALE for precision -- same quantity link_route_cost() inverts
+ * into a cost, but here larger is better (more bandwidth), so it feeds a
+ * widest-path (bottleneck-maximizing) search instead of a shortest-path one.
+ */
+static int link_bandwidth(const struct link *l)
+{
+    long long numer, bw;
+
+    if (l->weight <= 0) {
+        return 0;
+    }
+    numer = (long long) l->weight * ROUTE_COST_SCALE;
+    bw = numer / (l->active_flows.length + 1);
+    return bw > INT_MAX ? INT_MAX : (int) bw;
+}
+
+void path_resolve_widest(const struct topology *t,
+    id_t orig,
+    id_t dest,
+    struct vp_vec *path)
+{
+    size_t n_nodes = t->num_nodes;
+    int *dists = malloc(n_nodes * sizeof(int));
+    int *pred = malloc(n_nodes * sizeof(int));
+    char *done = calloc(n_nodes, sizeof(char));
+    struct vp_heap pq;
+    struct vp_vec *adj_list;
+    struct link *d, *aux_link, *d2;
+    id_t pivot;
+    int bw, cand;
+
+    for (size_t i = 0; i < n_nodes; i++) {
+        dists[i] = -1;
+        pred[i] = -1;
+    }
+    dists[dest] = INT_MAX;
+    pred[dest] = (int) dest;
+
+    vp_heap_alloc(&pq, n_nodes, pq_cmp_max);
+    d = link_alloc(0, dest, INT_MAX, 0);
+    vp_heap_push(&pq, d);
+
+    while (pq.length > 0) {
+        d = vp_heap_pop(&pq);
+        pivot = d->dest;
+        dist_free(d);
+        if (done[pivot]) {
+            continue;
+        }
+        done[pivot] = 1;
+        if (pivot == orig) {
+            break;
+        }
+        adj_list = &t->adj_lists[pivot];
+        for (size_t i = 0; i < adj_list->length; i++) {
+            aux_link = vp_vec_get(adj_list, i);
+            bw = link_bandwidth(aux_link);
+            cand = bw < dists[pivot] ? bw : dists[pivot];
+            if (cand > dists[aux_link->dest]) {
+                dists[aux_link->dest] = cand;
+                pred[aux_link->dest] = (int) pivot;
+                d2 = link_alloc(0, aux_link->dest, cand, 0);
                 vp_heap_push(&pq, d2);
             }
         }

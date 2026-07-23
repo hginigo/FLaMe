@@ -6,7 +6,8 @@
 
 enum routing_mode {
     ROUTING_STATIC = 0,   /* precomputed once at startup, hop-count shortest path */
-    ROUTING_DYNAMIC = 1,  /* resolved per-flow from current link contention */
+    ROUTING_DYNAMIC = 1,  /* resolved per-flow from current link contention, sum of 1/bw */
+    ROUTING_WIDEST = 2,   /* resolved per-flow, maximizes the path's bottleneck bandwidth */
 };
 
 struct config {

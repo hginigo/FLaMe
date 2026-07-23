@@ -46,6 +46,18 @@ void path_resolve_dynamic(const struct topology *t,
     id_t dest,
     struct vp_vec *path);
 
+/*
+ * Widest-path variant of path_resolve_dynamic: instead of minimizing the sum
+ * of 1/bw over the path, it maximizes the path's bottleneck bandwidth (the
+ * min corresp_bw across hops) -- i.e. the same quantity path_min_bw() will
+ * compute once the flow is attached. Same predecessor-from-dest,
+ * walk-forward-from-orig convention as path_resolve/path_resolve_dynamic.
+ */
+void path_resolve_widest(const struct topology *t,
+    id_t orig,
+    id_t dest,
+    struct vp_vec *path);
+
 /* Sum of ->latency over an already-resolved path (e.g. flow->path). Use
  * this instead of re-deriving a path from (orig, dest) so latency always
  * matches whichever path was actually chosen, static or dynamic. */

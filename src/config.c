@@ -90,6 +90,8 @@ int load_config(const char *path, struct config *cfg) {
                 cfg->routing = ROUTING_STATIC;
             } else if (strcmp(val, "dynamic") == 0) {
                 cfg->routing = ROUTING_DYNAMIC;
+            } else if (strcmp(val, "widest") == 0) {
+                cfg->routing = ROUTING_WIDEST;
             } else {
                 fprintf(stderr, "Warning: unknown routing mode '%s' for key '%s'\n", val, key);
             }

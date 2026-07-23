@@ -137,6 +137,11 @@ struct flow *flow_alloc(id_t orig,
 		if (!topology.directed) {
 			path_resolve_dynamic(&topology, dest, orig, &f->path_aux);
 		}
+	} else if (config.routing == ROUTING_WIDEST) {
+		path_resolve_widest(&topology, orig, dest, &f->path);
+		if (!topology.directed) {
+			path_resolve_widest(&topology, dest, orig, &f->path_aux);
+		}
 	} else {
 		path_resolve(&topology, orig, dest, &f->path);
 		if (!topology.directed) {
