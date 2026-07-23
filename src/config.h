@@ -27,6 +27,8 @@ struct config {
     enum routing_mode routing;  /* ROUTING_STATIC (default): hop-count path precomputed once
                                     at startup. ROUTING_DYNAMIC: each flow resolves its path
                                     ad-hoc from current link contention. */
+    int   control_bytes;         /* size (in bytes) of request/ack control flows, as opposed
+                                    to actual block/model transfers */
 };
 
 int load_config(const char *path, struct config *cfg);

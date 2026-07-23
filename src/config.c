@@ -24,6 +24,7 @@ int load_config(const char *path, struct config *cfg) {
     cfg->blocks_per_node = 1;
     cfg->epochs = 1;
     cfg->ms_per_epoch = 500;
+    cfg->control_bytes = 40;
     strncpy(cfg->model_name, "stub", MAX_VAL_LEN - 1);
 
     char line[MAX_LINE_LEN];
@@ -82,6 +83,8 @@ int load_config(const char *path, struct config *cfg) {
             cfg->ms_per_epoch = atoll(val);
         } else if (strcmp(key, "latency_ms") == 0) {
             cfg->latency_ms = atoi(val);
+        } else if (strcmp(key, "control_bytes") == 0) {
+            cfg->control_bytes = atoi(val);
         } else if (strcmp(key, "routing") == 0) {
             if (strcmp(val, "static") == 0) {
                 cfg->routing = ROUTING_STATIC;

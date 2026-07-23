@@ -160,7 +160,7 @@ static void single_copy_read_stage(struct task *t, int relocate)
     }
     switch (t->stage) {
     case 0:
-        flow_enqueue(orig->id, dest->id, 40, t);
+        flow_enqueue(orig->id, dest->id, (size_t) config.control_bytes, t);
     break;
     case 1:
         flow_enqueue(dest->id, orig->id, src->nbytes, t);
@@ -202,7 +202,7 @@ static void multi_copy_read_stage(struct task *t)
     switch (t->stage) {
     case 0:
         dest = nearest_replica(t->model, orig, &topology)->node;
-        flow_enqueue(orig->id, dest->id, 40, t);
+        flow_enqueue(orig->id, dest->id, (size_t) config.control_bytes, t);
     break;
     case 1:
         src = nearest_replica(t->model, orig, &topology);
@@ -245,7 +245,7 @@ static int scu_write_stage(struct task *t)
     }
     switch (t->stage) {
     case 0:
-        flow_enqueue(orig->id, dest->id, 40, t);
+        flow_enqueue(orig->id, dest->id, (size_t) config.control_bytes, t);
     break;
     case 1:
         flow_enqueue(dest->id, orig->id, r->nbytes, t);
@@ -287,7 +287,7 @@ static int scm_write_stage(struct task *t)
     }
     switch (t->stage) {
     case 0:
-        flow_enqueue(orig->id, dest->id, 40, t);
+        flow_enqueue(orig->id, dest->id, (size_t) config.control_bytes, t);
     break;
     case 1:
         flow_enqueue(dest->id, orig->id, r->nbytes, t);
@@ -324,7 +324,7 @@ static int mcm_write_stage(struct task *t)
                 if (r2->node->id == orig->id) {
                     continue;
                 }
-                flow_enqueue(orig->id, r2->node->id, 40, t);
+                flow_enqueue(orig->id, r2->node->id, (size_t) config.control_bytes, t);
             }
         break;
         case 1:
@@ -346,7 +346,7 @@ static int mcm_write_stage(struct task *t)
     switch (t->stage) {
     case 0:
         dest = nearest_replica(t->model, orig, &topology)->node;
-        flow_enqueue(orig->id, dest->id, 40, t);
+        flow_enqueue(orig->id, dest->id, (size_t) config.control_bytes, t);
     break;
     case 1:
         dest = nearest_replica(t->model, orig, &topology)->node;
@@ -355,7 +355,7 @@ static int mcm_write_stage(struct task *t)
     break;
     case 2:
         vp_for (r2, &t->model->replicas) {
-            flow_enqueue(orig->id, r2->node->id, 40, t);
+            flow_enqueue(orig->id, r2->node->id, (size_t) config.control_bytes, t);
         }
     break;
     case 3:
@@ -420,7 +420,7 @@ static int mcu_write_stage(struct task *t)
     switch (t->stage) {
     case 0:
         dest = nearest_replica(t->model, orig, &topology)->node;
-        flow_enqueue(orig->id, dest->id, 40, t);
+        flow_enqueue(orig->id, dest->id, (size_t) config.control_bytes, t);
     break;
     case 1:
         dest = nearest_replica(t->model, orig, &topology)->node;
