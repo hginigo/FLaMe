@@ -89,8 +89,10 @@ int load_config(const char *path, struct config *cfg) {
         } else if (strcmp(key, "hop_penalty") == 0) {
             cfg->hop_penalty = atoi(val);
         } else if (strcmp(key, "routing") == 0) {
-            if (strcmp(val, "static") == 0) {
-                cfg->routing = ROUTING_STATIC;
+            if (strcmp(val, "static") == 0 || strcmp(val, "bfs") == 0) {
+                cfg->routing = ROUTING_STATIC;   /* static == cached hop-count BFS */
+            } else if (strcmp(val, "dijkstra") == 0) {
+                cfg->routing = ROUTING_DIJKSTRA;
             } else if (strcmp(val, "dynamic") == 0) {
                 cfg->routing = ROUTING_DYNAMIC;
             } else if (strcmp(val, "widest") == 0) {

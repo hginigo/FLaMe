@@ -138,6 +138,7 @@ struct flow *flow_alloc(id_t orig,
 	memset(f, 0, sizeof(struct flow));
 
 	f->nbytes = nbytes;
+	f->nbytes_total = nbytes;
 	f->t = t;
 	f->id = flow_id++;
 	if (config.routing == ROUTING_DYNAMIC) {

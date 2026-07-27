@@ -33,6 +33,7 @@ enum policy_t policy;
 struct config config;
 struct metric metric_flow_hops;
 struct metric metric_link_contention;
+struct metric metric_flow_bw;
 
 
 void tasks_enqueue(struct vp_vec *task_list)
@@ -84,6 +85,17 @@ void flow_finish(const struct event *ev)
 		path_detach_flow(&f->path_aux, f, 0);
 	}
 	flows_reschedule(f);
+
+	/* Effective (time-weighted) bandwidth this flow ran at, in B/ms: total
+	 * bytes over its whole transfer duration. This already folds in every
+	 * mid-flight recalc, since the finish time embodies them all. Control
+	 * flows whose makespan floored to 0 have no duration; fall back to their
+	 * instantaneous bottleneck rate. */
+	time_t duration = sim_time - f->start_time;
+	long long eff_bw = duration > 0
+		? (long long) f->nbytes_total / duration
+		: (long long) f->min_bw;
+	metric_observe(&metric_flow_bw, eff_bw);
 
 	t->flow_rc--;
 	if (t->flow_rc == 0) {
@@ -376,6 +388,7 @@ int main(int argc, char *argv[])
 
 	metric_init(&metric_flow_hops, "flow_hops");
 	metric_init(&metric_link_contention, "link_contention");
+	metric_init(&metric_flow_bw, "flow_eff_bw_Bpms");
 
 	tasks_enqueue(&tasks);
 	dbg("-- SIMULATION START --\n");
@@ -385,6 +398,7 @@ int main(int argc, char *argv[])
 
 	metric_print(&metric_flow_hops);
 	metric_print(&metric_link_contention);
+	metric_print(&metric_flow_bw);
 
 	if (policy_name(policy)) {
 		out("%s (%d): ", policy_name(policy), (int) policy);

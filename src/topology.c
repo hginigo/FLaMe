@@ -10,6 +10,12 @@ extern struct config config;
 #define STR_LEN 512
 char line[STR_LEN];
 
+/* Fixed-point numerator for the 1/bandwidth costs used by the weighted
+ * (ROUTING_DIJKSTRA) cache and by link_route_cost(): link weights are big
+ * enough that plain integer 1/weight would floor to 0, so costs are
+ * SCALE/weight instead. */
+#define ROUTE_COST_SCALE 1000000
+
 int topo_multi_read(char *str, struct topology *t)
 {
     FILE *f = fopen(str, "r");
@@ -109,8 +115,8 @@ void topo_free(struct topology *t)
     }
 }
 
-/* Orders the dijkstra2 priority queue by hop-count (struct link reused as
- * a plain (dest, weight) pair, exactly as link_alloc(0, dest, weight, 0)
+/* Orders the dijkstra2 priority queue by accumulated path cost (struct link
+ * reused as a plain (dest, cost) pair, exactly as link_alloc(0, dest, cost, 0)
  * builds it below — these are queue entries, not real topology links). */
 static int pq_cmp(const void *a, const void *b)
 {
@@ -133,8 +139,33 @@ static int pq_cmp_max(const void *a, const void *b)
 int **dist_cache;
 size_t num_nodes;
 
+/*
+ * Per-edge cost for the precomputed dist_cache. weighted==0 (ROUTING_BFS /
+ * ROUTING_STATIC) charges a flat 1 per hop, so the cache holds hop-count
+ * shortest paths. weighted==1 (ROUTING_DIJKSTRA) charges SCALE/weight, i.e.
+ * 1/bandwidth, so the cache holds paths that minimise total transmission
+ * time over each link's max bandwidth cap (contention is ignored — active
+ * flows never enter this cost). When every link shares one bandwidth cap the
+ * weighted cost is a constant per hop, so both modes minimise the same
+ * quantity and produce identical caches.
+ */
+static int link_cache_cost(const struct link *l, int weighted)
+{
+    long long c;
+
+    if (!weighted) {
+        return 1;
+    }
+    if (l->weight <= 0) {
+        return INT_MAX;
+    }
+    c = (long long) ROUTE_COST_SCALE / l->weight;
+    return c > 0 ? (int) c : 1;
+}
+
 int dijkstra2(const struct topology *t,
-    id_t orig)
+    id_t orig,
+    int weighted)
 {
     size_t n_nodes = t->num_nodes;
     int *dists = malloc(n_nodes * sizeof(int));
@@ -144,6 +175,7 @@ int dijkstra2(const struct topology *t,
     struct vp_vec *adj_list;
     struct link *d, *aux_dist, *d2;
     id_t pivot;
+    int cost;
 
     vp_heap_alloc(&pq, n_nodes, pq_cmp);
     for (size_t i = 0; i < n_nodes; i++) {
@@ -168,8 +200,9 @@ int dijkstra2(const struct topology *t,
 
         for (size_t i = 0; i < adj_list->length; i++) {
             aux_dist = vp_vec_get(adj_list, i);
-            if (dists[aux_dist->dest] > (dists[pivot] + 1)) {
-                dists[aux_dist->dest] = dists[pivot] + 1;
+            cost = link_cache_cost(aux_dist, weighted);
+            if (dists[aux_dist->dest] > (dists[pivot] + cost)) {
+                dists[aux_dist->dest] = dists[pivot] + cost;
                 dis[aux_dist->dest] = (int) pivot;
                 d2 = link_alloc(0, aux_dist->dest, dists[aux_dist->dest], 0);
                 vp_heap_push(&pq, d2);
@@ -185,13 +218,19 @@ int dijkstra2(const struct topology *t,
 
 void dijkstra_init(const struct topology *t)
 {
+    /* Weighted (1/bandwidth) cache only for ROUTING_DIJKSTRA; every other mode
+     * uses the hop-count cache -- ROUTING_BFS/STATIC route on it directly, and
+     * the ad-hoc modes (dynamic/widest/hybrid) still read it via path_hops for
+     * nearest-replica selection. */
+    int weighted = (config.routing == ROUTING_DIJKSTRA);
+
     assert(t != NULL);
     num_nodes = t->num_nodes;
     assert(num_nodes > 0);
     dist_cache = malloc(num_nodes * sizeof(unsigned int *));
     for (size_t i = 0; i < num_nodes; i++) {
         dist_cache[i] = calloc(num_nodes, sizeof(unsigned int));
-        dijkstra2(t, i);
+        dijkstra2(t, i, weighted);
     }
 }
 
@@ -285,8 +324,6 @@ int path_vec_latency(const struct vp_vec *path)
  * scaled) is orders of magnitude bigger than active_flows.length+1, so
  * unscaled integer division would floor to 0 for nearly every link.
  */
-#define ROUTE_COST_SCALE 1000000
-
 static int link_route_cost(const struct link *l)
 {
     long long numer, cost;

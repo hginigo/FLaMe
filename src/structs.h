@@ -129,7 +129,8 @@ struct event {
 struct flow {
 	time_t start_time, prev_ts;
 	time_t makespan;
-	size_t nbytes;
+	size_t nbytes;		/* bytes still to deliver; decremented by recalc */
+	size_t nbytes_total;	/* original transfer size, kept for the effective-bw metric */
 	id_t id;
 	int marked;
 	int min_bw;

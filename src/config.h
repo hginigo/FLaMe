@@ -5,7 +5,7 @@
 #define MAX_VAL_LEN  128
 
 enum routing_mode {
-    ROUTING_STATIC = 0,   /* precomputed once at startup, hop-count shortest path */
+    ROUTING_STATIC = 0,   /* precomputed once at startup, hop-count shortest path (== BFS) */
     ROUTING_DYNAMIC = 1,  /* resolved per-flow from current link contention, sum of 1/bw */
     ROUTING_WIDEST = 2,   /* resolved per-flow, maximizes the path's bottleneck bandwidth */
     ROUTING_HYBRID = 3,   /* like DYNAMIC but each hop also carries a fixed hop_penalty cost,
@@ -14,6 +14,9 @@ enum routing_mode {
     ROUTING_WIDEST_HYBRID = 4, /* like WIDEST but hop_penalty B/ms is subtracted from the running
                              bottleneck per hop, so longer paths are discounted (penalty 0 ==
                              WIDEST, large penalty degenerates toward shortest-path) */
+    ROUTING_DIJKSTRA = 5, /* cached shortest path by 1/bandwidth over each link's max cap, no
+                             contention; identical to STATIC (== hop-count BFS) when all links
+                             share one bandwidth cap. `routing=bfs` is an alias for STATIC. */
 };
 
 struct config {
