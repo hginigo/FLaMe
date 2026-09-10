@@ -15,6 +15,14 @@ extern FILE *result;
 
 #define dbg(s, ...) fprintf(debug, s, ##__VA_ARGS__)
 #define out(s, ...) fprintf(result, s, ##__VA_ARGS__)
+/*
+ * Bandwidth unit. A .tpl link weight is given in Mbit/s; multiplying it by
+ * Bpms converts it to the bytes-per-ms capacity every rate computation in the
+ * flow model works in (topo_multi_read does this once, at load). Integer
+ * division truncates the exact 131.072 to 131 -- a deliberate ~0.05% under-run
+ * of nominal capacity, accepted as far below anything the policy/routing
+ * comparisons resolve.
+ */
 #define Bpms (1024 * 1024 / 8 / 1000)
 typedef unsigned int id_t;
 
@@ -142,6 +150,7 @@ struct flow {
 void models_free(struct vp_vec *models);
 void nodes_free(struct vp_vec *nodes);
 
+void *params_dup(const void *params, size_t nbytes);
 struct replica *replica_alloc(struct model *m, struct node *n,
 	void *params, size_t nbytes, unsigned int version, time_t stamp);
 struct replica *replica_dup(const struct replica *src, struct node *n, time_t stamp);

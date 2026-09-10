@@ -17,6 +17,7 @@
 #include "backend.h"
 #include "policy.h"
 #include "metrics.h"
+#include "trace.h"
 #define VP_VEC_IMPLEMENTATION
 #include "vp_vec.h"
 #define VP_LIST_IMPLEMENTATION
@@ -165,17 +166,21 @@ void event_print(const struct event *ev)
 
 		break;
 		case STAGE_NEXT:
-			if (ev->data.t->type == 0) {
+			t = ev->data.t;
+			if (t->type == READ) {
 				str = "R";
-			} else if (ev->data.t->type == 1) {
+			} else if (t->type == WRITE) {
 				str = "W";
-			} else if (ev->data.t->type == 3) {
+			} else if (t->type == BARRIER) {
 				str = "B";
 			} else {
 				str = "T";
 			}
+			/* BARRIER tasks are node-wide sync points and carry no model
+			 * (task_alloc(n, NULL, BARRIER)); print -1 rather than deref NULL. */
 			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | model %3d ]\n",
-				sim_time, ev->id, ev->data.t->id, str, ev->data.t->stage, ev->data.t->node->id, ev->data.t->model->id);
+				sim_time, ev->id, t->id, str, t->stage, t->node->id,
+				t->model ? (int) t->model->id : -1);
 		break;
 		case FLOW_START:
 			f = ev->data.f;
@@ -361,13 +366,15 @@ int main(int argc, char *argv[])
 	} else {
 		result = stdout;
 	}
-	if (!config.backend_cmd[0]) {
-		fprintf(stderr, "config: backend_cmd is required (path to the training backend)\n");
-		return 1;
-	}
-	if (backend_spawn(config.backend_cmd) < 0) {
-		fprintf(stderr, "failed to spawn backend '%s'\n", config.backend_cmd);
-		return 1;
+	if (config.backend_mode == BACKEND_PYTHON) {
+		if (!config.backend_cmd[0]) {
+			fprintf(stderr, "config: backend_cmd is required when backend_mode=python\n");
+			return 1;
+		}
+		if (backend_spawn(config.backend_cmd) < 0) {
+			fprintf(stderr, "failed to spawn backend '%s'\n", config.backend_cmd);
+			return 1;
+		}
 	}
 
 	vp_vec_alloc(&models, 512);
@@ -377,10 +384,29 @@ int main(int argc, char *argv[])
 	topology.directed = 0;
 	topo_multi_read(argv[1], &topology);
 	dbg("%s %s\n", argv[0], argv[1]);
+	/*
+	 * With a rounds_file the trace owns the rounds: the .tpl contributes only
+	 * its first (physical) topology, and the overlays it may carry are
+	 * replaced by one per trace round. Routing is unaffected either way --
+	 * dijkstra_init and every flow work on the physical graph alone.
+	 */
+	if (config.rounds_file[0]) {
+		if (trace_load(config.rounds_file) < 0) {
+			return 1;
+		}
+		if (topology.virt_topo) {
+			fprintf(stderr, "note: %s carries virtual rounds, but rounds_file"
+				" is set; the trace's %d round(s) are used instead\n",
+				argv[1], trace_rounds());
+		}
+		trace_build_rounds(&topology, 1);
+		dbg("trace %s: %d heads, %d rounds\n", config.rounds_file,
+			trace_nodes(), trace_rounds());
+	}
 	dijkstra_init(&topology);
 
 	gen_init(config.seed);
-	gen_models(&models, config.blocks_per_node * topology.num_nodes, 1, config.block_size);
+	gen_models(&models, config.blocks_per_node * topology.num_nodes, 1, (unsigned int) config.model_size);
 	gen_nodes(&nodes, &models, topology.num_nodes, 1, 0, 1);
 	models_init_replicas(&nodes, &models);
 	gen_init(config.seed);
@@ -406,6 +432,7 @@ int main(int argc, char *argv[])
 	out("%ld %ld\n", sim_time, (end - sta)/(CLOCKS_PER_SEC/1000));
 
 	backend_shutdown();
+	trace_free();
 	tasks_free(&tasks);
 	models_free(&models);
 	nodes_free(&nodes);

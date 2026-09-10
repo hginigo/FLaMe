@@ -220,6 +220,13 @@ static void multi_copy_read_stage(struct task *t)
     t->stage++;
 }
 
+static void stage_advance_now(struct task *t)
+{
+    struct event *ev = event_alloc(STAGE_NEXT, sim_time);
+    ev->data.t = t;
+    event_enqueue(ev);
+}
+
 /*
  * WRITE implementations. Each returns 1 if policy_dispatch should advance
  * t->stage afterwards, or 0 if the task was already fully retired (e.g. the
@@ -315,16 +322,22 @@ static int mcm_write_stage(struct task *t)
     struct node *dest;
     struct replica *own, *r2, *mine;
     long long sim_ms;
+    int sent;
 
     own = model_replica_of(t->model, orig);
     if (own) {
         switch (t->stage) {
         case 0:
+            sent = 0;
             vp_for (r2, &t->model->replicas) {
                 if (r2->node->id == orig->id) {
                     continue;
                 }
                 flow_enqueue(orig->id, r2->node->id, (size_t) config.control_bytes, t);
+                sent++;
+            }
+            if (!sent) {
+                stage_advance_now(t);
             }
         break;
         case 1:
@@ -384,6 +397,7 @@ static int mcu_write_stage(struct task *t)
     struct node *dest;
     struct replica *own, *r2, *mine;
     long long sim_ms;
+    int sent;
 
     own = model_replica_of(t->model, orig);
     if (own) {
@@ -395,17 +409,21 @@ static int mcu_write_stage(struct task *t)
             event_enqueue(ev);
         break;
         case 1:
+            sent = 0;
             vp_for (r2, &t->model->replicas) {
                 if (r2->node->id == orig->id) {
                     continue;
                 }
                 flow_enqueue(orig->id, r2->node->id, own->nbytes, t);
                 free(r2->params);
-                r2->params = malloc(own->nbytes);
-                memcpy(r2->params, own->params, own->nbytes);
+                r2->params = params_dup(own->params, own->nbytes);
                 r2->nbytes = own->nbytes;
                 r2->version = own->version;
                 r2->stamp = own->stamp;
+                sent++;
+            }
+            if (!sent) {
+                stage_advance_now(t);
             }
         break;
         case 2:
@@ -443,8 +461,7 @@ static int mcu_write_stage(struct task *t)
             }
             flow_enqueue(orig->id, r2->node->id, mine->nbytes, t);
             free(r2->params);
-            r2->params = malloc(mine->nbytes);
-            memcpy(r2->params, mine->params, mine->nbytes);
+            r2->params = params_dup(mine->params, mine->nbytes);
             r2->nbytes = mine->nbytes;
             r2->version = mine->version;
             r2->stamp = mine->stamp;

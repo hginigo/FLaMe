@@ -16,6 +16,19 @@ char line[STR_LEN];
  * SCALE/weight instead. */
 #define ROUTE_COST_SCALE 1000000
 
+/*
+ * Reads a .tpl topology file:
+ *   - line 1: the node count.
+ *   - then one line per edge, "orig dest weight [latency]". weight is the link
+ *     capacity in Mbit/s, converted to the simulator's bytes-per-ms unit by the
+ *     Bpms multiplier (structs.h); latency is the one-hop propagation delay in
+ *     ms, defaulting to config.latency_ms when the 4th field is absent.
+ *   - a line parsing to 0 fields (e.g. "-") closes the current graph and starts
+ *     a new virtual overlay, chained onto virt_topo. A file is therefore one
+ *     physical graph followed by N per-round overlay graphs.
+ * On an undirected topology each edge also gets a reverse link object, so the
+ * two directions share one capacity (half-duplex).
+ */
 int topo_multi_read(char *str, struct topology *t)
 {
     FILE *f = fopen(str, "r");

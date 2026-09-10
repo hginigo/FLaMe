@@ -6,7 +6,7 @@
 struct link {
     id_t orig;
     id_t dest;
-    int weight;
+    int weight;         /* capacity in B/ms: .tpl weight (Mbit/s) * Bpms */
     int latency;        /* fixed one-hop propagation delay, in ms */
     struct vp_vec active_flows;
 };

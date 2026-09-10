@@ -26,6 +26,9 @@ int load_config(const char *path, struct config *cfg) {
     cfg->ms_per_epoch = 500;
     cfg->control_bytes = 40;
     cfg->hop_penalty = 1600;
+    cfg->backend_mode = BACKEND_SYNTHETIC;
+    cfg->model_size = 1048576;   /* 1 MiB */
+    cfg->train_time = 400;       /* ms */
     strncpy(cfg->model_name, "stub", MAX_VAL_LEN - 1);
 
     char line[MAX_LINE_LEN];
@@ -52,8 +55,25 @@ int load_config(const char *path, struct config *cfg) {
         const char *key = line;
         const char *val = eq + 1;
 
-        if (strcmp(key, "block_size") == 0) {
-            cfg->block_size = atoi(val);
+        if (strcmp(key, "model_size") == 0) {
+            cfg->model_size = atoll(val);
+        } else if (strcmp(key, "train_time") == 0) {
+            cfg->train_time = atoll(val);
+        } else if (strcmp(key, "aggregate_time") == 0) {
+            cfg->aggregate_time = atoll(val);
+        } else if (strcmp(key, "rounds_file") == 0) {
+            strncpy(cfg->rounds_file, val, MAX_VAL_LEN - 1);
+            cfg->rounds_file[MAX_VAL_LEN - 1] = '\0';
+        } else if (strcmp(key, "backend_mode") == 0) {
+            if (strcmp(val, "synthetic") == 0) {
+                cfg->backend_mode = BACKEND_SYNTHETIC;
+            } else if (strcmp(val, "python") == 0) {
+                cfg->backend_mode = BACKEND_PYTHON;
+            } else if (strcmp(val, "trace") == 0) {
+                cfg->backend_mode = BACKEND_TRACE;
+            } else {
+                fprintf(stderr, "Warning: unknown backend_mode '%s' for key '%s'\n", val, key);
+            }
         } else if (strcmp(key, "policy") == 0) {
             cfg->policy = atoi(val);
         } else if (strcmp(key, "topology_directed") == 0) {

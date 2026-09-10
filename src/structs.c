@@ -18,16 +18,26 @@ struct replica *replica_alloc(struct model *m, struct node *n,
 	return r;
 }
 
+/* Duplicate a raw params blob. NULL in => NULL out with no allocation: the
+ * synthetic backend represents a model by size only (params == NULL, nbytes ==
+ * model_size), so nothing O(model_size) is copied. nbytes is carried by the
+ * caller regardless, so flow sizing is unaffected. */
+void *params_dup(const void *params, size_t nbytes)
+{
+	void *p = NULL;
+	if (params && nbytes > 0) {
+		p = malloc(nbytes);
+		memcpy(p, params, nbytes);
+	}
+	return p;
+}
+
 /* Deep-copies params: used whenever a *second* physical copy comes into
  * existence (multi-copy replication, or a staged snapshot pulled from a
  * peer) rather than a single copy just changing hands. */
 struct replica *replica_dup(const struct replica *src, struct node *n, time_t stamp)
 {
-	void *params = NULL;
-	if (src->nbytes > 0) {
-		params = malloc(src->nbytes);
-		memcpy(params, src->params, src->nbytes);
-	}
+	void *params = params_dup(src->params, src->nbytes);
 	return replica_alloc(src->model, n, params, src->nbytes, src->version, stamp);
 }
 

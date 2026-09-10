@@ -4,6 +4,18 @@
 #define MAX_LINE_LEN 256
 #define MAX_VAL_LEN  128
 
+enum backend_mode {
+    BACKEND_SYNTHETIC = 0, /* in-process: no training math, fixed per-node train_time,
+                              model transfers sized by model_size. No external process. */
+    BACKEND_PYTHON = 1,    /* spawn backend_cmd and talk protocol.txt over a pipe;
+                              real params/loss/sim_ms, model size decided by the backend. */
+    BACKEND_TRACE = 2,     /* replay a real run: like synthetic (no external process, no
+                              params buffer, transfers sized by model_size) except TRAIN
+                              and aggregation take the times recorded in rounds_file for
+                              that (node, round), falling back to train_time/aggregate_time
+                              wherever the trace is silent. */
+};
+
 enum routing_mode {
     ROUTING_STATIC = 0,   /* precomputed once at startup, hop-count shortest path (== BFS) */
     ROUTING_DYNAMIC = 1,  /* resolved per-flow from current link contention, sum of 1/bw */
@@ -20,7 +32,8 @@ enum routing_mode {
 };
 
 struct config {
-    int   block_size;
+    long long model_size;      /* model wire size in bytes; sizes model-transfer flows in the
+                                  synthetic backend (was the unused `block_size`, now live) */
     int   topology_directed;   /* 1 = on, 0 = off */
     int   policy;
     char  output[MAX_VAL_LEN];
@@ -28,7 +41,15 @@ struct config {
     int   barriers;            /* 1 = on, 0 = off */
     int   blocks_per_node;
     int   seed;
-    char  backend_cmd[MAX_VAL_LEN];  /* shell command that speaks protocol.txt */
+    enum backend_mode backend_mode; /* BACKEND_SYNTHETIC (default), _PYTHON or _TRACE */
+    long long train_time;      /* synthetic backend: sim-ms every node's TRAIN takes; in
+                                  trace mode, the fallback where a trace line has no time */
+    long long aggregate_time;  /* sim-ms an aggregation takes. Fallback in trace mode, and
+                                  the flat cost in synthetic mode (was hardcoded 0) */
+    char  rounds_file[MAX_VAL_LEN];  /* DFL execution trace: supplies one virtual overlay
+                                        per round, so the .tpl need only carry the physical
+                                        graph, plus the per-(node, round) work times */
+    char  backend_cmd[MAX_VAL_LEN];  /* python mode only: shell command that speaks protocol.txt */
     char  model_name[MAX_VAL_LEN];   /* opaque tag passed through to the backend */
     int   epochs;               /* per TRAIN call */
     int   nshards;               /* dataset partitions; defaults to node count */

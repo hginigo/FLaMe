@@ -7,12 +7,15 @@ genuinely drop further under aggregation, without pulling in a real ML
 framework. Swap `train`/`aggregate` for real model code and this file stays
 a valid backend for blokek.
 """
+import os
 import sys
 import json
-import struct
 import numpy as np
 
-DIM = 8
+# Model dimensionality = params vector length. Wire size is DIM*8 bytes (float64),
+# which is what the simulator uses to size model-transfer flows. Override via the
+# MODEL_DIM env var to simulate larger models (e.g. 1310720 -> 10 MiB models).
+DIM = int(os.environ.get("MODEL_DIM", "8"))
 
 
 def read_msg():
@@ -34,12 +37,13 @@ def write_msg(header, payload=b""):
 
 
 def pack(vec):
-    return struct.pack(f"{len(vec)}d", *vec)
+    # numpy tobytes/frombuffer instead of struct.pack(f"{n}d", *vec): the latter
+    # explodes to n positional args and is unusably slow for large DIM (10 MB models).
+    return np.ascontiguousarray(vec, dtype="<f8").tobytes()
 
 
 def unpack(buf):
-    n = len(buf) // 8
-    return np.array(struct.unpack(f"{n}d", buf))
+    return np.frombuffer(buf, dtype="<f8")
 
 
 targets = {}
