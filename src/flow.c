@@ -188,5 +188,6 @@ void flow_enqueue(id_t orig, id_t dest, size_t nbytes, struct task *t)
 		sim_time + path_vec_latency(&f->path));
 	metric_observe(&metric_flow_hops, (long long) f->path.length);
 	ev->data.f = f;
+	t->flow_rc++;
 	event_enqueue(ev);
 }

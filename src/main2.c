@@ -69,7 +69,6 @@ void flow_start(const struct event *ev)
 
 	flows_reschedule(f);
 
-	t->flow_rc++;
 	f->finish_ev = event_alloc(FLOW_FINISH, f->start_time+f->makespan);
 	f->finish_ev->data.f = f;
 	event_enqueue(f->finish_ev);
