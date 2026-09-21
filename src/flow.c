@@ -4,14 +4,13 @@
 #include "event.h"
 #include "config.h"
 #include "metrics.h"
+#include "log.h"
 #include <string.h>
 #include <limits.h>
 
 extern struct topology topology;
 extern time_t sim_time;
 extern struct config config;
-extern struct metric metric_flow_hops;
-extern struct metric metric_link_contention;
 
 void path_attach_flow(struct vp_vec *path, struct flow *f, int record)
 {
@@ -19,7 +18,7 @@ void path_attach_flow(struct vp_vec *path, struct flow *f, int record)
 	vp_for (l, path) {
 		vp_vec_append(&l->active_flows, f);
 		if (record) {
-			metric_observe(&metric_link_contention, (long long) l->active_flows.length);
+			metric_observe(&metrics.link_contention, (long long) l->active_flows.length);
 		}
 	}
 }
@@ -33,7 +32,7 @@ void path_detach_flow(struct vp_vec *path, struct flow *f, int record)
 		assert(ind > -1);
 		vp_vec_remove(&l->active_flows, (size_t) ind);
 		if (record) {
-			metric_observe(&metric_link_contention, (long long) l->active_flows.length);
+			metric_observe(&metrics.link_contention, (long long) l->active_flows.length);
 		}
 	}
 }
@@ -58,7 +57,8 @@ time_t flow_recalc_makespan(struct flow *f, time_t cur_time)
 {
 	f->marked = 0;
 	int new_bw = path_min_bw(&f->path);
-	int dbg_prev_bw = f->min_bw;
+	int prev_bw = f->min_bw;
+	long long left_bytes;
 	time_t delta_time = cur_time - f->prev_ts;
 	/* Byte counts are widened: min_bw (B/ms) * delta_time overflows a 32-bit
 	 * int once a flow lives long enough (~2^31 / 6550 B/ms ≈ 5 min of sim
@@ -78,8 +78,11 @@ time_t flow_recalc_makespan(struct flow *f, time_t cur_time)
 	}
 	f->makespan = cur_time - f->start_time + remaining_time;
 	f->prev_ts = cur_time;
-	dbg("flow %u recalc tB %lld (%d) dt[%ld] rB %lld (%d) rt[%ld]\n",
-		f->id, transferred_bytes, dbg_prev_bw/Bpms, delta_time, remaining_bytes, f->min_bw/Bpms, remaining_time);
+	left_bytes = remaining_bytes > 0 ? remaining_bytes : 0;
+	log_line("FLOW_RECALC", f->t->node, f->t, f->stage,
+		"f%u sent %lldB left %lldB bw %d->%dB/ms eta %ldms",
+		f->id, (long long) f->nbytes_total - left_bytes, left_bytes,
+		prev_bw, f->min_bw, (long) remaining_time);
 
 	return cur_time + remaining_time;
 }
@@ -140,6 +143,8 @@ struct flow *flow_alloc(id_t orig,
 	f->nbytes = nbytes;
 	f->nbytes_total = nbytes;
 	f->t = t;
+	f->stage = t ? t->stage : -1;
+	f->control = nbytes == (size_t) config.control_bytes;
 	f->id = flow_id++;
 	if (config.routing == ROUTING_DYNAMIC) {
 		path_resolve_dynamic(&topology, orig, dest, &f->path, 0);
@@ -186,7 +191,6 @@ void flow_enqueue(id_t orig, id_t dest, size_t nbytes, struct task *t)
 	struct flow *f = flow_alloc(orig, dest, nbytes, t);
 	struct event *ev = event_alloc(FLOW_START,
 		sim_time + path_vec_latency(&f->path));
-	metric_observe(&metric_flow_hops, (long long) f->path.length);
 	ev->data.f = f;
 	t->flow_rc++;
 	event_enqueue(ev);

@@ -18,6 +18,8 @@
 #include "policy.h"
 #include "metrics.h"
 #include "trace.h"
+#include "log.h"
+#include "report.h"
 #define VP_VEC_IMPLEMENTATION
 #include "vp_vec.h"
 #define VP_LIST_IMPLEMENTATION
@@ -32,9 +34,6 @@ struct vp_heap event_queue = {0};
 time_t sim_time;
 enum policy_t policy;
 struct config config;
-struct metric metric_flow_hops;
-struct metric metric_link_contention;
-struct metric metric_flow_bw;
 
 
 void tasks_enqueue(struct vp_vec *task_list)
@@ -51,10 +50,21 @@ void tasks_enqueue(struct vp_vec *task_list)
 	}
 }
 
+static id_t flow_src(const struct flow *f)
+{
+	return ((struct link *) vp_vec_get(&f->path, 0))->orig;
+}
+
+static id_t flow_dst(const struct flow *f)
+{
+	return ((struct link *) vp_vec_get(&f->path, f->path.length - 1))->dest;
+}
+
 void flow_start(const struct event *ev)
 {
 	struct flow *f = ev->data.f;
 	struct task *t = f->t;
+	char path[512], load[512];
 
 	f->start_time = sim_time;
 	f->prev_ts = sim_time;
@@ -64,8 +74,12 @@ void flow_start(const struct event *ev)
 	}
 	f->min_bw = path_min_bw(&f->path);
 	f->makespan = f->nbytes / (f->min_bw);
-	dbg("flow %d start rB %d (%d) rt[%d]\n",
-		f->id, f->nbytes, f->min_bw/Bpms, f->makespan);
+	log_line("FLOW_START", t->node, t, f->stage,
+		"f%u %u->%u %zuB path %s load %s bw %dB/ms eta %ldms",
+		f->id, flow_src(f), flow_dst(f), f->nbytes_total,
+		log_path(path, sizeof(path), &f->path),
+		log_load(load, sizeof(load), &f->path),
+		f->min_bw, (long) f->makespan);
 
 	flows_reschedule(f);
 
@@ -88,14 +102,21 @@ void flow_finish(const struct event *ev)
 
 	/* Effective (time-weighted) bandwidth this flow ran at, in B/ms: total
 	 * bytes over its whole transfer duration. This already folds in every
-	 * mid-flight recalc, since the finish time embodies them all. Control
-	 * flows whose makespan floored to 0 have no duration; fall back to their
-	 * instantaneous bottleneck rate. */
+	 * mid-flight recalc, since the finish time embodies them all. Only model
+	 * transfers get one: a control message's makespan floors to 0 ms, so it
+	 * has no duration to divide by. */
 	time_t duration = sim_time - f->start_time;
-	long long eff_bw = duration > 0
-		? (long long) f->nbytes_total / duration
-		: (long long) f->min_bw;
-	metric_observe(&metric_flow_bw, eff_bw);
+	if (f->control) {
+		metric_observe(&metrics.ctrl_hops, (long long) f->path.length);
+		metric_observe(&metrics.ctrl_bytes, (long long) f->nbytes_total);
+	} else {
+		metric_observe(&metrics.data_hops, (long long) f->path.length);
+		metric_observe(&metrics.data_bytes, (long long) f->nbytes_total);
+		metric_observe(&metrics.data_xfer_ms, (long long) duration);
+		metric_observe(&metrics.data_bw, duration > 0
+			? (long long) f->nbytes_total / duration
+			: (long long) f->min_bw);
+	}
 
 	t->flow_rc--;
 	if (t->flow_rc == 0) {
@@ -104,6 +125,18 @@ void flow_finish(const struct event *ev)
 		event_enqueue(stage_next);
 	}
 	flow_dealloc(f);
+}
+
+static void task_retire(struct node *n)
+{
+	struct task *t = n->current_task;
+
+	if (!t) {
+		return;
+	}
+	metric_observe(&metrics.task_ms[t->type], (long long) (sim_time - t->start_time));
+	metrics.tasks_done++;
+	n->current_task = NULL;
 }
 
 void dispatcher_init(struct vp_vec *node_list)
@@ -130,90 +163,56 @@ void flow_dbg(struct task *t)
 	flow_enqueue(orig->id, dest->id, 50, t);
 }
 
-void path_dbg(const struct vp_vec *p)
-{
-	assert(p->length >= 1);
-	struct link *l = vp_vec_get(p, 0);
-	dbg("%d -> %d", l->orig, l->dest);
-	for (size_t i = 1; i < p->length; i++) {
-		l = vp_vec_get(p, i);
-		dbg(" -> %d", l->dest);
-	}
-	dbg("\n");
-	vp_for (l, p) {
-		dbg("  %2d ", l->active_flows.length);
-	}
-	dbg("\n");
-}
-
+/*
+ * FLOW_START and ROUND_BARRIER are logged by flow_start() and round_barrier()
+ * instead: only there are a new flow's rate and a barrier's arrival count
+ * known.
+ */
 void event_print(const struct event *ev)
 {
-	char *str;
-	struct link *orig, *dest;
-	struct flow *f;
+	struct node *n;
 	struct task *t;
-	switch (ev->type) {
-		case PULL_TASK:
-		dbg("%10ld [ ev %3d | node %3d | ",
-			sim_time, ev->id, ev->data.n->id);
-		if (ev->data.n->task_queue.length == 0) {
-			dbg("FINISH ]\n");
-		} else {
-			dbg("NEW TASK | remaining %3d ]\n",
-			ev->data.n->task_queue.length);
-		}
+	struct flow *f;
+	time_t dur;
 
-		break;
-		case STAGE_NEXT:
-			t = ev->data.t;
-			if (t->type == READ) {
-				str = "R";
-			} else if (t->type == WRITE) {
-				str = "W";
-			} else if (t->type == BARRIER) {
-				str = "B";
-			} else {
-				str = "T";
-			}
-			/* BARRIER tasks are node-wide sync points and carry no model
-			 * (task_alloc(n, NULL, BARRIER)); print -1 rather than deref NULL. */
-			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | model %3d ]\n",
-				sim_time, ev->id, t->id, str, t->stage, t->node->id,
-				t->model ? (int) t->model->id : -1);
-		break;
-		case FLOW_START:
-			f = ev->data.f;
-			t = f->t;
-			orig = vp_vec_get(&f->path, 0);
-			dest = vp_vec_get(&f->path, f->path.length-1);
-			if (t->type == READ) {
-				str = "R";
-			} else if (t->type == WRITE) {
-				str = "W";
-			} else {
-				str = "T";
-			}
-			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | model %3d | FLOW %2d STA %2d  -> %2d | %ldB ]\n",
-				sim_time, ev->id, t->id, str, t->stage, t->node->id, t->model->id,
-				f->id, orig->orig, dest->dest, f->nbytes);
-			path_dbg(&f->path);
-		break;
-		case FLOW_FINISH:
-			f = ev->data.f;
-			t = f->t;
-			orig = vp_vec_get(&f->path, 0);
-			dest = vp_vec_get(&f->path, f->path.length-1);
-			if (t->type == READ) {
-				str = "R";
-			} else if (t->type == WRITE) {
-				str = "W";
-			} else {
-				str = "T";
-			}
-			dbg("%10ld [ ev %3d | task %3d (%s) st %3d | node %3d | model %3d | FLOW %2d END %2d  -> %2d | %ldB | %ld + %ldms ]\n",
-				sim_time, ev->id, t->id, str, t->stage, t->node->id, t->model->id,
-				f->id, orig->orig, dest->dest, f->nbytes, f->start_time, f->makespan);
-		break;
+	switch (ev->type) {
+	case PULL_TASK:
+		n = ev->data.n;
+		if (n->task_queue.length) {
+			log_line("PULL", n, NULL, -1, "next task, %zu queued",
+				(size_t) n->task_queue.length);
+		} else {
+			log_line("PULL", n, NULL, -1, "queue empty, node done");
+		}
+	break;
+	case STAGE_NEXT:
+		t = ev->data.t;
+		if (t->model) {
+			log_line("STAGE", t->node, t, t->stage, "model %u", t->model->id);
+		} else {
+			log_line("STAGE", t->node, t, t->stage, "%s", "");
+		}
+	break;
+	case FLOW_FINISH:
+		f = ev->data.f;
+		t = f->t;
+		dur = sim_time - f->start_time;
+		if (dur > 0) {
+			log_line("FLOW_END", t->node, t, f->stage,
+				"f%u %u->%u %zuB done %ldms (%ld->%ld) avg %lldB/ms",
+				f->id, flow_src(f), flow_dst(f), f->nbytes_total, (long) dur,
+				(long) f->start_time, (long) sim_time,
+				(long long) f->nbytes_total / dur);
+		} else {
+			log_line("FLOW_END", t->node, t, f->stage,
+				"f%u %u->%u %zuB done 0ms (%ld)",
+				f->id, flow_src(f), flow_dst(f), f->nbytes_total,
+				(long) sim_time);
+		}
+	break;
+	case FLOW_START:
+	case ROUND_BARRIER:
+	break;
 	}
 }
 
@@ -223,12 +222,18 @@ void round_barrier(struct event *ev)
 	struct task *t;
 	struct event *new;
 	static int node_count = 0;
+	static int round = 0;
+	size_t resumed = 0;
 
 	node_count++;
+	log_line("BARRIER", ev->data.t->node, ev->data.t, -1, "arrived %d/%zu",
+		node_count, (size_t) nodes.length);
 	if (node_count >= nodes.length) {
 		node_count = 0;
 		vp_for (n, &nodes) {
+			task_retire(n);
 			if (!n->task_queue.length) {
+				metric_observe(&metrics.node_finish_ms, (long long) sim_time);
 				continue;
 			}
 #ifdef USE_VP_LIST
@@ -237,11 +242,15 @@ void round_barrier(struct event *ev)
 			t = vp_vec_remove(&n->task_queue, 0);
 #endif
 			n->current_task = t;
+			t->start_time = sim_time;
 
 			new = event_alloc(STAGE_NEXT, sim_time);
 			new->data.t = t;
 			event_enqueue(new);
+			resumed++;
 		}
+		log_line("BARRIER", NULL, NULL, -1, "round %d released, %zu nodes resume",
+			++round, resumed);
 	}
 }
 
@@ -260,7 +269,9 @@ void event_process(struct event *ev)
 	break;
 	case PULL_TASK:
 		n = ev->data.n;
+		task_retire(n);
 		if (!n->task_queue.length) {
+			metric_observe(&metrics.node_finish_ms, (long long) sim_time);
 			break;
 		}
 #ifdef USE_VP_LIST
@@ -269,6 +280,7 @@ void event_process(struct event *ev)
 		t = vp_vec_remove(&n->task_queue, 0);
 #endif
 		n->current_task = t;
+		t->start_time = sim_time;
 
 		new = event_alloc(STAGE_NEXT, sim_time);
 		new->data.t = t;
@@ -348,7 +360,9 @@ void models_init_replicas(struct vp_vec *nl, struct vp_vec *ml)
 int main(int argc, char *argv[])
 {
 	struct vp_vec tasks;
-	time_t sta, end;
+	clock_t cpu_sta, cpu_end;
+	struct timespec wall_sta, wall_end;
+	long wall_ms;
 
 	if (argc < 3) {
 		fprintf(stderr, "usage: %s [topol_fname] [config_fname]\n", argv[0]);
@@ -382,7 +396,7 @@ int main(int argc, char *argv[])
 
 	topology.directed = 0;
 	topo_multi_read(argv[1], &topology);
-	dbg("%s %s\n", argv[0], argv[1]);
+	dbg("# %s %s %s\n", argv[0], argv[1], argv[2]);
 	/*
 	 * With a rounds_file the trace owns the rounds: the .tpl contributes only
 	 * its first (physical) topology, and the overlays it may carry are
@@ -399,7 +413,7 @@ int main(int argc, char *argv[])
 				argv[1], trace_rounds());
 		}
 		trace_build_rounds(&topology, 1);
-		dbg("trace %s: %d heads, %d rounds\n", config.rounds_file,
+		dbg("# trace %s: %d heads, %d rounds\n", config.rounds_file,
 			trace_nodes(), trace_rounds());
 	}
 	dijkstra_init(&topology);
@@ -411,24 +425,21 @@ int main(int argc, char *argv[])
 	gen_init(config.seed);
 	wl_virt_rounds(&tasks);
 
-	metric_init(&metric_flow_hops, "flow_hops");
-	metric_init(&metric_link_contention, "link_contention");
-	metric_init(&metric_flow_bw, "flow_eff_bw_Bpms");
+	metrics_init();
+	metrics.tasks_total = (long long) tasks.length;
 
 	tasks_enqueue(&tasks);
-	dbg("-- SIMULATION START --\n");
-	sta = clock();
+	log_header();
+	clock_gettime(CLOCK_MONOTONIC, &wall_sta);
+	cpu_sta = clock();
 	event_loop(&nodes, &event_queue);
-	end = clock();
+	cpu_end = clock();
+	clock_gettime(CLOCK_MONOTONIC, &wall_end);
+	wall_ms = (wall_end.tv_sec - wall_sta.tv_sec) * 1000
+		+ (wall_end.tv_nsec - wall_sta.tv_nsec) / 1000000;
 
-	metric_print(&metric_flow_hops);
-	metric_print(&metric_link_contention);
-	metric_print(&metric_flow_bw);
-
-	if (policy_name(policy)) {
-		out("%s (%d): ", policy_name(policy), (int) policy);
-	}
-	out("%ld %ld\n", sim_time, (end - sta)/(CLOCKS_PER_SEC/1000));
+	report_print(argv[1], wall_ms,
+		(long) ((cpu_end - cpu_sta) / (CLOCKS_PER_SEC / 1000)));
 
 	backend_shutdown();
 	trace_free();

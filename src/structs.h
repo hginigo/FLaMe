@@ -100,6 +100,7 @@ enum task_t {
 	TRAIN,
 	BARRIER
 };
+#define N_TASK_TYPES 4
 
 /* Associated to workloads */
 struct task {
@@ -110,6 +111,7 @@ struct task {
 	int flow_rc;
 	int stage;
 	enum task_t type;
+	time_t start_time;	/* when its node pulled it, for the latency metric */
 };
 
 enum event_t {
@@ -140,6 +142,8 @@ struct flow {
 	size_t nbytes;		/* bytes still to deliver; decremented by recalc */
 	size_t nbytes_total;	/* original transfer size, kept for the effective-bw metric */
 	id_t id;
+	int stage;		/* stage of t that started this flow, for the log */
+	int control;		/* a control message (config.control_bytes), not a model */
 	int marked;
 	int min_bw;
 	struct vp_vec path, path_aux;
