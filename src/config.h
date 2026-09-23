@@ -55,6 +55,8 @@ struct config {
     int   nshards;               /* dataset partitions; defaults to node count */
     long long ms_per_epoch;      /* advisory hint passed to the backend at init */
     int   latency_ms;            /* default per-link propagation delay; .tpl lines may override */
+    int   bandwidth_mbps;        /* default per-link capacity in Mbit/s for .tpl edges that give
+                                    no weight (or "-"); 0 = unset, every edge must carry one */
     enum routing_mode routing;  /* ROUTING_STATIC (default): hop-count path precomputed once
                                     at startup. ROUTING_DYNAMIC: each flow resolves its path
                                     ad-hoc from current link contention. */

@@ -19,13 +19,17 @@ char line[STR_LEN];
 /*
  * Reads a .tpl topology file:
  *   - line 1: the node count.
- *   - then one line per edge, "orig dest weight [latency]". weight is the link
- *     capacity in Mbit/s, converted to the simulator's bytes-per-ms unit by the
- *     Bpms multiplier (structs.h); latency is the one-hop propagation delay in
- *     ms, defaulting to config.latency_ms when the 4th field is absent.
- *   - a line parsing to 0 fields (e.g. "-") closes the current graph and starts
- *     a new virtual overlay, chained onto virt_topo. A file is therefore one
- *     physical graph followed by N per-round overlay graphs.
+ *   - then one line per edge, "orig dest [weight [latency]]". weight is the
+ *     link capacity in Mbit/s, converted to the simulator's bytes-per-ms unit
+ *     by the Bpms multiplier (structs.h), defaulting to config.bandwidth_mbps
+ *     when absent; latency is the one-hop propagation delay in ms, defaulting
+ *     to config.latency_ms when absent. Either may also be written "-" to take
+ *     its default explicitly, so "0 1 - 10" is a default-bandwidth, 10 ms link.
+ *     An edge of the physical graph with no weight and no bandwidth_mbps set is
+ *     an error; overlay weights are never used for routing, so there it is not.
+ *   - a line whose first field is not a number (e.g. "-") closes the current
+ *     graph and starts a new virtual overlay, chained onto virt_topo. A file is
+ *     therefore one physical graph followed by N per-round overlay graphs.
  * On an undirected topology each edge also gets a reverse link object, so the
  * two directions share one capacity (half-duplex).
  *
@@ -34,6 +38,24 @@ char line[STR_LEN];
  * in an overlay it has no peers that round. Either way it still trains and
  * aggregates its own model, it just never exchanges one.
  */
+/* One numeric .tpl field: 1 and *out set if it is an integer, 0 if it is the
+ * "-" placeholder (use the default), -1 if it is anything else. */
+static int tpl_field(const char *tok, int *out)
+{
+    char *end;
+    long v;
+
+    if (strcmp(tok, "-") == 0) {
+        return 0;
+    }
+    v = strtol(tok, &end, 10);
+    if (end == tok || *end != '\0' || v < INT_MIN || v > INT_MAX) {
+        return -1;
+    }
+    *out = (int) v;
+    return 1;
+}
+
 int topo_multi_read(char *str, struct topology *t)
 {
     FILE *f = fopen(str, "r");
@@ -41,6 +63,9 @@ int topo_multi_read(char *str, struct topology *t)
     int ret;
     int n_nodes;
     int orig, dest, weight, latency;
+    char *tok[4];
+    int ntok, lineno = 1;
+    int has_w, has_l;
     struct link *l;
     struct vp_vec *al;
     struct topology *aux;
@@ -51,40 +76,62 @@ int topo_multi_read(char *str, struct topology *t)
     }
     res = fgets(line, STR_LEN, f);
     ret = sscanf(line, "%d\n", &n_nodes);
+    if (!res || ret != 1 || n_nodes <= 0) {
+        fprintf(stderr, "topology: %s:1: expected the node count\n", str);
+        fclose(f);
+        exit(1);
+    }
     topo_init(t, n_nodes);
 
     aux = t;
     while ((res = fgets(line, STR_LEN, f))) {
-        ret = sscanf(line, "%d %d %d %d\n", &orig, &dest, &weight, &latency);
-        if (ret == 3 || ret == 4) {
-            if (orig < 0 || orig >= n_nodes || dest < 0 || dest >= n_nodes) {
-                fprintf(stderr, "topology: %s: edge %d-%d is outside the %d"
-                    " declared nodes\n", str, orig, dest, n_nodes);
-                fclose(f);
-                exit(1);
-            }
-            if (ret == 3) {
-                latency = config.latency_ms;
-            }
-            l = link_alloc(orig, dest, weight * Bpms, latency);
-            al = &aux->adj_lists[orig];
-            vp_vec_append(al, l);
-            if (!aux->directed) {
-                l = link_alloc(dest, orig, weight * Bpms, latency);
-                al = &aux->adj_lists[dest];
-                vp_vec_append(al, l);
-            }
-        } else if (ret == 0) {
+        lineno++;
+        ntok = 0;
+        for (char *p = strtok(line, " \t\r\n"); p && ntok < 4; p = strtok(NULL, " \t\r\n")) {
+            tok[ntok++] = p;
+        }
+        if (ntok > 0 && tpl_field(tok[0], &orig) != 1) {
+            /* "-" or any non-numeric line: start the next overlay */
             aux->virt_topo = malloc(sizeof(struct topology));
             aux = aux->virt_topo;
             aux->directed = t->directed;
             topo_init(aux, n_nodes);
-        } else {
-            perror("sscanf");
+            continue;
+        }
+        if (ntok < 2 || tpl_field(tok[1], &dest) != 1
+                || (has_w = ntok > 2 ? tpl_field(tok[2], &weight) : 0) < 0
+                || (has_l = ntok > 3 ? tpl_field(tok[3], &latency) : 0) < 0) {
+            fprintf(stderr, "topology: %s:%d: expected \"orig dest [weight"
+                " [latency]]\"\n", str, lineno);
             fclose(f);
             exit(1);
         }
-
+        if (orig < 0 || orig >= n_nodes || dest < 0 || dest >= n_nodes) {
+            fprintf(stderr, "topology: %s: edge %d-%d is outside the %d"
+                " declared nodes\n", str, orig, dest, n_nodes);
+            fclose(f);
+            exit(1);
+        }
+        if (!has_w) {
+            if (config.bandwidth_mbps <= 0 && aux == t) {
+                fprintf(stderr, "topology: %s:%d: edge %d-%d has no bandwidth"
+                    " and bandwidth_mbps is not set\n", str, lineno, orig, dest);
+                fclose(f);
+                exit(1);
+            }
+            weight = config.bandwidth_mbps > 0 ? config.bandwidth_mbps : 1;
+        }
+        if (!has_l) {
+            latency = config.latency_ms;
+        }
+        l = link_alloc(orig, dest, weight * Bpms, latency);
+        al = &aux->adj_lists[orig];
+        vp_vec_append(al, l);
+        if (!aux->directed) {
+            l = link_alloc(dest, orig, weight * Bpms, latency);
+            al = &aux->adj_lists[dest];
+            vp_vec_append(al, l);
+        }
     }
     fclose(f);
     return 0;

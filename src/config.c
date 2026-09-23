@@ -102,6 +102,10 @@ int config_set(struct config *cfg, const char *key, const char *val, const char 
         SET_INT(ms_per_epoch);
     } else if (strcmp(key, "latency_ms") == 0) {
         SET_INT(latency_ms);
+    } else if (strcmp(key, "bandwidth_mbps") == 0) {
+        long long v;
+        if (parse_ll(val, &v) < 0 || v < 0 || v > 1000000) goto bad_value;
+        cfg->bandwidth_mbps = (int) v;
     } else if (strcmp(key, "control_bytes") == 0) {
         SET_INT(control_bytes);
     } else if (strcmp(key, "hop_penalty") == 0) {
