@@ -64,6 +64,9 @@ struct config {
                                     1/bw contention cost, in the same fixed-point units as
                                     link_route_cost (an uncontended mid-weight link is ~100-300);
                                     higher biases toward shorter paths, meant to be swept */
+    char  disconnected[MAX_VAL_LEN]; /* comma-separated node ids cut off the physical graph:
+                                    they still train and aggregate but never exchange models.
+                                    Empty (default) = rely on the .tpl/trace alone. */
 };
 
 int load_config(const char *path, struct config *cfg);
@@ -72,5 +75,8 @@ int load_config(const char *path, struct config *cfg);
 int config_set(struct config *cfg, const char *key, const char *val, const char *where);
 /* Apply one "key=value" command-line override, same keys as the file. */
 int config_override(struct config *cfg, const char *arg);
+/* Parse a comma-separated id list ("3,7"; "" = none) into ids[0..max).
+ * ids may be NULL to only validate. Returns the count, or -1 if malformed. */
+int config_id_list(const char *val, long long *ids, int max);
 
 #endif /* _CONFIG_H*/

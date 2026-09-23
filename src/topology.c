@@ -28,6 +28,11 @@ char line[STR_LEN];
  *     physical graph followed by N per-round overlay graphs.
  * On an undirected topology each edge also gets a reverse link object, so the
  * two directions share one capacity (half-duplex).
+ *
+ * Nodes need not be connected. A node no edge mentions is a disconnected
+ * agent: in the physical graph it has no route to anyone (see topo_reachable),
+ * in an overlay it has no peers that round. Either way it still trains and
+ * aggregates its own model, it just never exchanges one.
  */
 int topo_multi_read(char *str, struct topology *t)
 {
@@ -52,6 +57,12 @@ int topo_multi_read(char *str, struct topology *t)
     while ((res = fgets(line, STR_LEN, f))) {
         ret = sscanf(line, "%d %d %d %d\n", &orig, &dest, &weight, &latency);
         if (ret == 3 || ret == 4) {
+            if (orig < 0 || orig >= n_nodes || dest < 0 || dest >= n_nodes) {
+                fprintf(stderr, "topology: %s: edge %d-%d is outside the %d"
+                    " declared nodes\n", str, orig, dest, n_nodes);
+                fclose(f);
+                exit(1);
+            }
             if (ret == 3) {
                 latency = config.latency_ms;
             }
@@ -125,6 +136,37 @@ void topo_free(struct topology *t)
     free(t->adj_lists);
     if (t->virt_topo != NULL) {
         topo_free(t->virt_topo);
+    }
+}
+
+/*
+ * Cut agent `n` off the network: free every link out of it and every link
+ * into it from the other adjacency lists, so topo_reachable() is false
+ * between n and anyone else once dijkstra_init runs. Meant for the physical
+ * graph, before dijkstra_init; overlays keep their edges and simply see
+ * their READs of or by n dropped at workload generation.
+ */
+void topo_isolate(struct topology *t, id_t n)
+{
+    struct vp_vec *al;
+    struct link *l;
+
+    al = &t->adj_lists[n];
+    vp_for (l, al) {
+        vp_vec_free(&l->active_flows);
+        free(l);
+    }
+    al->length = 0;
+    for (size_t i = 0; i < t->num_nodes; i++) {
+        al = &t->adj_lists[i];
+        for (size_t j = al->length; j-- > 0; ) {
+            l = vp_vec_get(al, j);
+            if (l->dest == n) {
+                vp_vec_remove(al, j);
+                vp_vec_free(&l->active_flows);
+                free(l);
+            }
+        }
     }
 }
 
@@ -247,6 +289,18 @@ void dijkstra_init(const struct topology *t)
     }
 }
 
+/*
+ * Is there any physical path orig -> dest? Read off the dist_cache (so only
+ * valid after dijkstra_init): dijkstra2 leaves -1 as the predecessor of every
+ * node it never reached, i.e. every node in another connected component.
+ * Reachability is the same for every routing mode, since the ad-hoc resolvers
+ * search the same graph and only differ in how they cost its links.
+ */
+int topo_reachable(id_t orig, id_t dest)
+{
+    return dist_cache[dest][orig] >= 0;
+}
+
 void path_resolve(const struct topology *t,
     id_t orig,
     id_t dest,
@@ -256,6 +310,9 @@ void path_resolve(const struct topology *t,
     id_t pivot = orig;
     struct vp_vec *adj_list;
     struct link *aux;
+    if (d[orig] < 0) {
+        return;     /* unreachable: leave path empty */
+    }
     while (pivot != dest) {
         adj_list = &t->adj_lists[pivot];
         vp_for (aux, adj_list) {
@@ -277,6 +334,9 @@ int path_hops(const struct topology *t,
     struct link *aux;
     int hops = 0;
 
+    if (d[orig] < 0) {
+        return -1;  /* unreachable */
+    }
     while (pivot != dest) {
         adj_list = &t->adj_lists[pivot];
         vp_for (aux, adj_list) {
@@ -419,7 +479,7 @@ void path_resolve_dynamic(const struct topology *t,
     vp_heap_free(&pq);
 
     pivot = orig;
-    while (pivot != dest) {
+    while (pred[orig] >= 0 && pivot != dest) {   /* unreachable: path stays empty */
         adj_list = &t->adj_lists[pivot];
         vp_for (aux_link, adj_list) {
             if (aux_link->dest == (id_t) pred[pivot]) {
@@ -525,7 +585,7 @@ void path_resolve_widest(const struct topology *t,
     vp_heap_free(&pq);
 
     pivot = orig;
-    while (pivot != dest) {
+    while (pred[orig] >= 0 && pivot != dest) {   /* unreachable: path stays empty */
         adj_list = &t->adj_lists[pivot];
         vp_for (aux_link, adj_list) {
             if (aux_link->dest == (id_t) pred[pivot]) {

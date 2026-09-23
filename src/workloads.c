@@ -3,6 +3,7 @@
 #include "topology.h"
 #include "vp_vec.h"
 #include "config.h"
+#include "metrics.h"
 extern struct config config;
 
 struct task *task_alloc(
@@ -42,6 +43,16 @@ void single_node(struct vp_vec *tl,
         if (count > max_neigh_cap) {
             break;
         }
+        /* The overlay (or trace) may pair agents the physical graph cannot
+         * connect -- a disconnected agent, or one in another component. That
+         * exchange cannot happen, so drop the READ; the agent still trains
+         * and aggregates what it has. */
+        if (!topo_reachable(n->id, l->dest)) {
+            dbg("# READ %u<-%u dropped: no physical path\n", n->id, l->dest);
+            metrics.reads_dropped++;
+            continue;
+        }
+        n->n_reads++;
         aux_model = vp_vec_get(ml, l->dest);
         aux = task_alloc(n, aux_model, READ);
         vp_vec_append(tl, aux);

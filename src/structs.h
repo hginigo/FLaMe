@@ -92,6 +92,7 @@ struct node {
 	struct vp_vec staged;	/* struct replica* pulled from peers, unaggregated */
 	double loss, acc;	/* last values reported by the backend */
 	int trained;		/* has the backend ever trained this node? */
+	int n_reads;		/* READs the workload gave it; 0 = disconnected agent */
 };
 
 enum task_t {

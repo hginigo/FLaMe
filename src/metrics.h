@@ -41,6 +41,8 @@ struct run_metrics {
     struct metric link_contention;          /* active flows, sampled per attach/detach */
     struct metric node_finish_ms;           /* one per node that drained its queue */
     long long tasks_total, tasks_done;
+    long long reads_dropped;    /* overlay READs with no physical path; counted at
+                                   workload generation, before metrics_init */
 };
 
 extern struct run_metrics metrics;

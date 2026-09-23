@@ -357,6 +357,28 @@ void models_init_replicas(struct vp_vec *nl, struct vp_vec *ml)
 	}
 }
 
+/*
+ * Cut every node in config.disconnected off the physical graph. Must run
+ * before dijkstra_init, which then sees them as unreachable. Out-of-range ids
+ * are fatal: a sweep over the wrong topology must not silently run connected.
+ */
+static int apply_disconnected(void)
+{
+	long long ids[MAX_VAL_LEN];
+	int n = config_id_list(config.disconnected, ids, MAX_VAL_LEN);
+
+	for (int i = 0; i < n; i++) {
+		if (ids[i] >= (long long) topology.num_nodes) {
+			fprintf(stderr, "config: disconnected node %lld is outside the"
+				" topology's %zu nodes\n", ids[i], topology.num_nodes);
+			return -1;
+		}
+		topo_isolate(&topology, (id_t) ids[i]);
+		dbg("# disconnected node %lld\n", ids[i]);
+	}
+	return 0;
+}
+
 int main(int argc, char *argv[])
 {
 	struct vp_vec tasks;
@@ -427,6 +449,9 @@ int main(int argc, char *argv[])
 		trace_build_rounds(&topology, 1);
 		dbg("# trace %s: %d heads, %d rounds\n", config.rounds_file,
 			trace_nodes(), trace_rounds());
+	}
+	if (apply_disconnected() < 0) {
+		return 1;
 	}
 	dijkstra_init(&topology);
 

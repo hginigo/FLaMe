@@ -20,7 +20,8 @@ extern enum policy_t policy;
 /*
  * Locates the replica of `m` nearest (by hop count) to `from`, mirroring
  * what the old owners-list shortest_path search did — now returning the
- * replica itself (not just its holder), since callers need both.
+ * replica itself (not just its holder), since callers need both. Holders
+ * with no physical path from `from` are skipped; NULL if none is reachable.
  */
 struct replica *nearest_replica(const struct model *m,
     const struct node *from,
@@ -31,7 +32,7 @@ struct replica *nearest_replica(const struct model *m,
 
     vp_for (r, &m->replicas) {
         hops = path_hops(t, from->id, r->node->id);
-        if (hops < min_hops) {
+        if (hops >= 0 && hops < min_hops) {
             min_hops = hops;
             min = r;
         }
@@ -190,7 +191,6 @@ static void multi_copy_read_stage(struct task *t)
 {
     struct event *ev;
     struct node *orig = t->node;
-    struct node *dest;
     struct replica *src;
 
     if (model_replica_of(t->model, orig)) {
@@ -201,8 +201,15 @@ static void multi_copy_read_stage(struct task *t)
     }
     switch (t->stage) {
     case 0:
-        dest = nearest_replica(t->model, orig, &topology)->node;
-        flow_enqueue(orig->id, dest->id, (size_t) config.control_bytes, t);
+        src = nearest_replica(t->model, orig, &topology);
+        if (!src) {
+            /* every copy sits across a partition: nothing to read */
+            ev = event_alloc(PULL_TASK, sim_time);
+            ev->data.n = orig;
+            event_enqueue(ev);
+            return;
+        }
+        flow_enqueue(orig->id, src->node->id, (size_t) config.control_bytes, t);
     break;
     case 1:
         src = nearest_replica(t->model, orig, &topology);

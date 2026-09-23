@@ -157,6 +157,13 @@ struct flow *flow_alloc(id_t orig,
 	} else {
 		path_resolve(&topology, orig, dest, &f->path);
 	}
+	if (!f->path.length && orig != dest) {
+		/* Workload generation drops READs across partitions, so this is
+		 * a policy trying to reach a disconnected agent: fail loudly
+		 * rather than start a flow that can never deliver. */
+		fprintf(stderr, "flow %u->%u: no physical path\n", orig, dest);
+		exit(1);
+	}
 	/*
 	 * Undirected edges are shared half-duplex: a flow must also occupy the
 	 * reverse-direction link of every physical hop it crosses. Derive that

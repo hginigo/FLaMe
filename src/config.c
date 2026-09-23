@@ -25,6 +25,27 @@ static int parse_ll(const char *val, long long *out) {
     return 0;
 }
 
+/* Comma-separated list of non-negative ids ("3,7,12"; "" is an empty list).
+ * Fills up to `max` entries of ids (may be NULL to only validate) and returns
+ * the count, or -1 on malformed input. */
+int config_id_list(const char *val, long long *ids, int max) {
+    char buf[MAX_VAL_LEN];
+    char *tok, *save;
+    long long v;
+    int n = 0;
+
+    if (val[0] == '\0') return 0;
+    if (strlen(val) >= sizeof(buf)) return -1;
+    snprintf(buf, sizeof(buf), "%s", val);
+    if (buf[0] == ',' || buf[strlen(buf) - 1] == ',' || strstr(buf, ",,")) return -1;
+    for (tok = strtok_r(buf, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        if (parse_ll(tok, &v) < 0 || v < 0 || n >= max) return -1;
+        if (ids) ids[n] = v;
+        n++;
+    }
+    return n;
+}
+
 #define SET_INT(field) do {                                   \
         long long v_;                                         \
         if (parse_ll(val, &v_) < 0) goto bad_value;           \
@@ -85,6 +106,9 @@ int config_set(struct config *cfg, const char *key, const char *val, const char 
         SET_INT(control_bytes);
     } else if (strcmp(key, "hop_penalty") == 0) {
         SET_INT(hop_penalty);
+    } else if (strcmp(key, "disconnected") == 0) {
+        if (config_id_list(val, NULL, MAX_VAL_LEN) < 0) goto bad_value;
+        SET_STR(disconnected);
     } else if (strcmp(key, "routing") == 0) {
         if (strcmp(val, "static") == 0 || strcmp(val, "bfs") == 0) {
             cfg->routing = ROUTING_STATIC;   /* static == cached hop-count BFS */

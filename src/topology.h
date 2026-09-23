@@ -25,7 +25,14 @@ struct link *link_alloc(id_t orig,
 void topo_init(struct topology *t, size_t num_nodes);
 void topo_free(struct topology *t);
 
+/* Remove every link to and from node n (a forced disconnected agent). */
+void topo_isolate(struct topology *t, id_t n);
 void dijkstra_init(const struct topology *t);
+/* Physical reachability, from the dijkstra cache. False across connected
+ * components, i.e. to or from a disconnected agent. */
+int topo_reachable(id_t orig, id_t dest);
+/* path_resolve and the ad-hoc resolvers below leave `path` empty, and
+ * path_hops returns -1, when dest is unreachable from orig. */
 void path_resolve(const struct topology *t,
     id_t orig,
     id_t dest,

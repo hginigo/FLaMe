@@ -45,4 +45,6 @@ void metrics_init(void)
     metric_init(&metrics.node_finish_ms, "node finish (ms)");
     metrics.tasks_total = 0;
     metrics.tasks_done = 0;
+    /* reads_dropped is left alone: the workload, generated before this runs,
+     * already counted it (a global, so it starts at 0). */
 }

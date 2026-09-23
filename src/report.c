@@ -81,6 +81,18 @@ static int rounds(void)
 	return r;
 }
 
+/* Agents the workload never gave a READ: they trained and aggregated alone. */
+static size_t isolated_nodes(void)
+{
+	const struct node *n;
+	size_t k = 0;
+
+	vp_for (n, &nodes) {
+		if (!n->n_reads) k++;
+	}
+	return k;
+}
+
 static double pct(long long part, long long whole)
 {
 	return whole > 0 ? 100.0 * (double) part / (double) whole : 0.0;
@@ -131,6 +143,10 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		pct(M->task_ms[TRAIN].sum, node_time), pct(M->task_ms[READ].sum, node_time),
 		pct(M->task_ms[WRITE].sum, node_time), pct(M->task_ms[BARRIER].sum, node_time),
 		pct(idle, node_time));
+	if (isolated_nodes() || M->reads_dropped) {
+		out("agents     %zu disconnected (no READ in any round)  %lld reads dropped"
+			" (no physical path)\n", isolated_nodes(), M->reads_dropped);
+	}
 	out("traffic    data %s in %lld flows  control %s in %lld flows\n",
 		bytes_human(a, sizeof(a), M->data_bytes.sum), M->data_bytes.count,
 		bytes_human(b, sizeof(b), M->ctrl_bytes.sum), M->ctrl_bytes.count);
@@ -167,7 +183,7 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		" train_pct=%.2f read_pct=%.2f write_pct=%.2f barrier_pct=%.2f idle_pct=%.2f"
 		" data_flows=%lld data_bytes=%lld data_xfer_ms_avg=%.2f data_bw_avg=%.2f"
 		" data_hops_avg=%.3f ctrl_flows=%lld ctrl_bytes=%lld ctrl_hops_avg=%.3f"
-		" link_contention_avg=%.3f\n",
+		" link_contention_avg=%.3f isolated_nodes=%zu reads_dropped=%lld\n",
 		pol, (int) policy, routing_name(config.routing),
 		backend_name(config.backend_mode), config.barriers ? "on" : "off",
 		topo, (size_t) nodes.length, physical_links(), rounds(),
@@ -185,5 +201,5 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		M->data_bytes.count, M->data_bytes.sum, metric_avg(&M->data_xfer_ms),
 		metric_avg(&M->data_bw), metric_avg(&M->data_hops),
 		M->ctrl_bytes.count, M->ctrl_bytes.sum, metric_avg(&M->ctrl_hops),
-		metric_avg(&M->link_contention));
+		metric_avg(&M->link_contention), isolated_nodes(), M->reads_dropped);
 }
