@@ -365,9 +365,17 @@ int main(int argc, char *argv[])
 	long wall_ms;
 
 	if (argc < 3) {
-		fprintf(stderr, "usage: %s [topol_fname] [config_fname]\n", argv[0]);
+		fprintf(stderr, "usage: %s <topology.tpl> <config.conf> [key=value ...]\n", argv[0]);
+		return 1;
 	}
-	load_config(argv[2], &config);
+	if (load_config(argv[2], &config) < 0) {
+		return 1;
+	}
+	for (int i = 3; i < argc; i++) {
+		if (config_override(&config, argv[i]) < 0) {
+			return 1;
+		}
+	}
 	policy = config.policy;
 	if (config.debug[0]) {
 		debug = fopen(config.debug, "w");
@@ -396,7 +404,11 @@ int main(int argc, char *argv[])
 
 	topology.directed = 0;
 	topo_multi_read(argv[1], &topology);
-	dbg("# %s %s %s\n", argv[0], argv[1], argv[2]);
+	dbg("#");
+	for (int i = 0; i < argc; i++) {
+		dbg(" %s", argv[i]);
+	}
+	dbg("\n");
 	/*
 	 * With a rounds_file the trace owns the rounds: the .tpl contributes only
 	 * its first (physical) topology, and the overlays it may carry are

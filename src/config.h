@@ -67,5 +67,10 @@ struct config {
 };
 
 int load_config(const char *path, struct config *cfg);
+/* Apply one setting; `where` names its source in error messages. Returns -1
+ * on an unknown key or invalid value, leaving the setting unchanged. */
+int config_set(struct config *cfg, const char *key, const char *val, const char *where);
+/* Apply one "key=value" command-line override, same keys as the file. */
+int config_override(struct config *cfg, const char *arg);
 
 #endif /* _CONFIG_H*/

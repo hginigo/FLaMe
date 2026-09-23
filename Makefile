@@ -19,7 +19,7 @@ OBJ_DIR := obj
 BIN_DIR := .
 
 # --- Target binary ------------------------------------------------------------
-TARGET := $(BIN_DIR)/blokek
+TARGET := $(BIN_DIR)/flame
 
 # --- Sources, objects & dependency files (auto-discovered) -------------------
 SRCS := $(wildcard $(SRC_DIR)/*.c)
