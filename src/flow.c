@@ -7,6 +7,7 @@
 #include "log.h"
 #include <string.h>
 #include <limits.h>
+#include <float.h>
 
 extern struct topology topology;
 extern time_t sim_time;
@@ -37,40 +38,47 @@ void path_detach_flow(struct vp_vec *path, struct flow *f, int record)
 	}
 }
 
-int path_min_bw(const struct vp_vec *path_list)
+/* A flow's rate: the smallest equal share across its links, in B/ms. Kept
+ * fractional -- a slow link split several ways (12.5 B/ms at 100 Kbit/s)
+ * would otherwise floor to a fraction of its real share. */
+double path_min_bw(const struct vp_vec *path_list)
 {
 	struct link *aux;
-	int link_min = INT_MAX;
-	int aux_bw;
+	double link_min = DBL_MAX;
+	double aux_bw;
 
 	vp_for (aux, path_list) {
 		assert(aux->active_flows.length > 0);
-		aux_bw = aux->weight / aux->active_flows.length;
+		aux_bw = aux->weight / (double) aux->active_flows.length;
 		if (aux_bw < link_min) {
 			link_min = aux_bw;
 		}
 	}
-	return link_min > 0 ? link_min : 1;
+	assert(link_min > 0);
+	return link_min;
 }
 
 time_t flow_recalc_makespan(struct flow *f, time_t cur_time)
 {
 	f->marked = 0;
-	int new_bw = path_min_bw(&f->path);
-	int prev_bw = f->min_bw;
+	double new_bw = path_min_bw(&f->path);
+	double prev_bw = f->min_bw;
 	long long left_bytes;
 	time_t delta_time = cur_time - f->prev_ts;
-	/* Byte counts are widened: min_bw (B/ms) * delta_time overflows a 32-bit
-	 * int once a flow lives long enough (~2^31 / 6550 B/ms ≈ 5 min of sim
-	 * time on a weight-50 link), and model payloads push nbytes far past
-	 * block-sized transfers. remaining_bytes must stay signed — it goes
-	 * negative when a flow has already delivered everything it owed. */
-	long long transferred_bytes = (long long) f->min_bw * delta_time;
+	/* Byte counts are long long: model payloads push nbytes far past a
+	 * 32-bit int. Bytes sent at a fractional rate are floored to whole bytes.
+	 * remaining_bytes must stay signed — it goes negative when a flow has
+	 * already delivered everything it owed. */
+	long long transferred_bytes = (long long) (f->min_bw * (double) delta_time);
 	long long remaining_bytes = (long long) f->nbytes - transferred_bytes;
 
 	time_t remaining_time;
 	if (remaining_bytes > 0) {
-		remaining_time = (remaining_bytes + new_bw - 1) / new_bw;
+		/* ceil(remaining / new_bw), without libm */
+		remaining_time = (time_t) ((double) remaining_bytes / new_bw);
+		if ((double) remaining_time * new_bw < (double) remaining_bytes) {
+			remaining_time++;
+		}
 		f->min_bw = new_bw;
 		f->nbytes = (size_t) remaining_bytes;
 	} else {
@@ -80,7 +88,7 @@ time_t flow_recalc_makespan(struct flow *f, time_t cur_time)
 	f->prev_ts = cur_time;
 	left_bytes = remaining_bytes > 0 ? remaining_bytes : 0;
 	log_line("FLOW_RECALC", f->t->node, f->t, f->stage,
-		"f%u sent %lldB left %lldB bw %d->%dB/ms eta %ldms",
+		"f%u sent %lldB left %lldB bw %.2f->%.2fB/ms eta %ldms",
 		f->id, (long long) f->nbytes_total - left_bytes, left_bytes,
 		prev_bw, f->min_bw, (long) remaining_time);
 

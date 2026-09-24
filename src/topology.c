@@ -3,6 +3,7 @@
 #include "vp_heap.h"
 #include <stdio.h>
 #include <limits.h>
+#include <float.h>
 #include <string.h>
 
 extern struct config config;
@@ -20,9 +21,10 @@ char line[STR_LEN];
  * Reads a .tpl topology file:
  *   - line 1: the node count.
  *   - then one line per edge, "orig dest [weight [latency]]". weight is the
- *     link capacity in Mbit/s, converted to the simulator's bytes-per-ms unit
- *     by the Bpms multiplier (structs.h), defaulting to config.bandwidth_mbps
- *     when absent; latency is the one-hop propagation delay in ms, defaulting
+ *     link capacity in Mbit/s (SI; decimals and k/M/G suffixes accepted, so
+ *     "0.1" == "100k" == 100 Kbit/s), converted to the simulator's bytes-per-ms
+ *     unit by the Bpms multiplier (structs.h), defaulting to
+ *     config.bandwidth_mbps when absent; latency is the one-hop propagation delay in ms, defaulting
  *     to config.latency_ms when absent. Either may also be written "-" to take
  *     its default explicitly, so "0 1 - 10" is a default-bandwidth, 10 ms link.
  *     An edge of the physical graph with no weight and no bandwidth_mbps set is
@@ -56,16 +58,27 @@ static int tpl_field(const char *tok, int *out)
     return 1;
 }
 
+/* The weight field: 1 and *mbps set for a valid rate (see config_parse_mbps),
+ * 0 for the "-" placeholder, -1 otherwise. */
+static int tpl_rate(const char *tok, double *mbps)
+{
+    if (strcmp(tok, "-") == 0) {
+        return 0;
+    }
+    return config_parse_mbps(tok, mbps) == 0 ? 1 : -1;
+}
+
 int topo_multi_read(char *str, struct topology *t)
 {
     FILE *f = fopen(str, "r");
     char *res;
     int ret;
     int n_nodes;
-    int orig, dest, weight, latency;
+    int orig, dest, latency;
     char *tok[4];
     int ntok, lineno = 1;
     int has_w, has_l;
+    double mbps;
     struct link *l;
     struct vp_vec *al;
     struct topology *aux;
@@ -99,7 +112,7 @@ int topo_multi_read(char *str, struct topology *t)
             continue;
         }
         if (ntok < 2 || tpl_field(tok[1], &dest) != 1
-                || (has_w = ntok > 2 ? tpl_field(tok[2], &weight) : 0) < 0
+                || (has_w = ntok > 2 ? tpl_rate(tok[2], &mbps) : 0) < 0
                 || (has_l = ntok > 3 ? tpl_field(tok[3], &latency) : 0) < 0) {
             fprintf(stderr, "topology: %s:%d: expected \"orig dest [weight"
                 " [latency]]\"\n", str, lineno);
@@ -119,16 +132,16 @@ int topo_multi_read(char *str, struct topology *t)
                 fclose(f);
                 exit(1);
             }
-            weight = config.bandwidth_mbps > 0 ? config.bandwidth_mbps : 1;
+            mbps = config.bandwidth_mbps > 0 ? config.bandwidth_mbps : 1;
         }
         if (!has_l) {
             latency = config.latency_ms;
         }
-        l = link_alloc(orig, dest, weight * Bpms, latency);
+        l = link_alloc(orig, dest, mbps * Bpms, latency);
         al = &aux->adj_lists[orig];
         vp_vec_append(al, l);
         if (!aux->directed) {
-            l = link_alloc(dest, orig, weight * Bpms, latency);
+            l = link_alloc(dest, orig, mbps * Bpms, latency);
             al = &aux->adj_lists[dest];
             vp_vec_append(al, l);
         }
@@ -139,7 +152,7 @@ int topo_multi_read(char *str, struct topology *t)
 
 struct link *link_alloc(id_t orig,
                         id_t dest,
-                        int weight,
+                        double weight,
                         int latency)
 {
     struct link *aux = malloc(sizeof(struct link));
@@ -253,7 +266,7 @@ size_t num_nodes;
  */
 static int link_cache_cost(const struct link *l, int weighted)
 {
-    long long c;
+    double c;
 
     if (!weighted) {
         return 1;
@@ -261,8 +274,11 @@ static int link_cache_cost(const struct link *l, int weighted)
     if (l->weight <= 0) {
         return INT_MAX;
     }
-    c = (long long) ROUTE_COST_SCALE / l->weight;
-    return c > 0 ? (int) c : 1;
+    c = ROUTE_COST_SCALE / l->weight;
+    if (c >= INT_MAX) {
+        return INT_MAX;
+    }
+    return c >= 1 ? (int) c : 1;
 }
 
 int dijkstra2(const struct topology *t,
@@ -446,14 +462,13 @@ int path_vec_latency(const struct vp_vec *path)
  */
 static int link_route_cost(const struct link *l)
 {
-    long long numer, cost;
+    double cost;
 
     if (l->weight <= 0) {
         return INT_MAX;
     }
-    numer = (long long) (l->active_flows.length + 1) * ROUTE_COST_SCALE;
-    cost = numer / l->weight;
-    return cost > INT_MAX ? INT_MAX : (int) cost;
+    cost = (double) (l->active_flows.length + 1) * ROUTE_COST_SCALE / l->weight;
+    return cost >= INT_MAX ? INT_MAX : (int) cost;
 }
 
 /*
@@ -552,12 +567,12 @@ void path_resolve_dynamic(const struct topology *t,
  * and puts it on a scale where path_resolve_widest's hop_penalty (also in
  * B/ms of bottleneck given up per hop) is a meaningful knob.
  */
-static int link_bandwidth(const struct link *l)
+static double link_bandwidth(const struct link *l)
 {
     if (l->weight <= 0) {
         return 0;
     }
-    return l->weight / (int) (l->active_flows.length + 1);
+    return l->weight / (double) (l->active_flows.length + 1);
 }
 
 /*
@@ -568,7 +583,7 @@ static int link_bandwidth(const struct link *l)
  * -- the widest-path analog of the additive penalty path_resolve_dynamic
  * uses. penalty 0 is pure widest; a large penalty makes hop count dominate
  * and degenerates toward shortest-path routing. Because the penalty can push
- * the running value negative, unreached nodes use INT_MIN (not -1) as the
+ * the running value negative, unreached nodes use -DBL_MAX (not -1) as the
  * "no path yet" sentinel. Same predecessor-from-dest / walk-forward-from-orig
  * convention as the other resolvers.
  */
@@ -579,24 +594,24 @@ void path_resolve_widest(const struct topology *t,
     int hop_penalty)
 {
     size_t n_nodes = t->num_nodes;
-    int *dists = malloc(n_nodes * sizeof(int));
+    double *dists = malloc(n_nodes * sizeof(double));
     int *pred = malloc(n_nodes * sizeof(int));
     char *done = calloc(n_nodes, sizeof(char));
     struct vp_heap pq;
     struct vp_vec *adj_list;
     struct link *d, *aux_link, *d2;
     id_t pivot;
-    int bw, cand;
+    double bw, cand;
 
     for (size_t i = 0; i < n_nodes; i++) {
-        dists[i] = INT_MIN;
+        dists[i] = -DBL_MAX;
         pred[i] = -1;
     }
-    dists[dest] = INT_MAX;
+    dists[dest] = DBL_MAX;
     pred[dest] = (int) dest;
 
     vp_heap_alloc(&pq, n_nodes, pq_cmp_max);
-    d = link_alloc(0, dest, INT_MAX, 0);
+    d = link_alloc(0, dest, DBL_MAX, 0);
     vp_heap_push(&pq, d);
 
     while (pq.length > 0) {

@@ -46,6 +46,33 @@ int config_id_list(const char *val, long long *ids, int max) {
     return n;
 }
 
+/* A link rate in Mbit/s: a positive decimal ("50", "0.1") with an optional SI
+ * suffix k/K (kbit/s), m/M (Mbit/s) or g/G (Gbit/s), so "100k" == "0.1".
+ * Stores Mbit/s in *mbps and returns 0, or -1 if malformed, <= 0 or above
+ * 1 Tbit/s. */
+int config_parse_mbps(const char *val, double *mbps) {
+    char *end;
+    double v, scale = 1.0;
+
+    errno = 0;
+    v = strtod(val, &end);
+    if (end == val || errno) return -1;
+    if (*end == 'k' || *end == 'K') {
+        scale = 1e-3;
+        end++;
+    } else if (*end == 'm' || *end == 'M') {
+        end++;
+    } else if (*end == 'g' || *end == 'G') {
+        scale = 1e3;
+        end++;
+    }
+    if (*end != '\0') return -1;
+    v *= scale;
+    if (!(v > 0.0) || v > 1e6) return -1;	/* also rejects nan */
+    *mbps = v;
+    return 0;
+}
+
 #define SET_INT(field) do {                                   \
         long long v_;                                         \
         if (parse_ll(val, &v_) < 0) goto bad_value;           \
@@ -103,9 +130,14 @@ int config_set(struct config *cfg, const char *key, const char *val, const char 
     } else if (strcmp(key, "latency_ms") == 0) {
         SET_INT(latency_ms);
     } else if (strcmp(key, "bandwidth_mbps") == 0) {
-        long long v;
-        if (parse_ll(val, &v) < 0 || v < 0 || v > 1000000) goto bad_value;
-        cfg->bandwidth_mbps = (int) v;
+        double mbps;
+        if (strcmp(val, "0") == 0) {
+            cfg->bandwidth_mbps = 0;    /* explicit "no default" */
+        } else if (config_parse_mbps(val, &mbps) == 0) {
+            cfg->bandwidth_mbps = mbps;
+        } else {
+            goto bad_value;
+        }
     } else if (strcmp(key, "control_bytes") == 0) {
         SET_INT(control_bytes);
     } else if (strcmp(key, "hop_penalty") == 0) {

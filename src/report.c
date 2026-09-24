@@ -135,11 +135,11 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 	out("tasks      %lld/%lld done", M->tasks_done, M->tasks_total);
 	out("  nodes finished %lld/%zu\n", nodes_done, (size_t) nodes.length);
 	if (M->node_finish_ms.count) {
-		out("stragglers node finish min %lld  avg %.1f  max %lld ms\n",
+		out("stragglers node finish min %lld  avg %.2f  max %lld ms\n",
 			M->node_finish_ms.min, metric_avg(&M->node_finish_ms),
 			M->node_finish_ms.max);
 	}
-	out("node time  train %.1f%%  read %.1f%%  write %.1f%%  barrier %.1f%%  idle %.1f%%\n",
+	out("node time  train %.2f%%  read %.2f%%  write %.2f%%  barrier %.2f%%  idle %.2f%%\n",
 		pct(M->task_ms[TRAIN].sum, node_time), pct(M->task_ms[READ].sum, node_time),
 		pct(M->task_ms[WRITE].sum, node_time), pct(M->task_ms[BARRIER].sum, node_time),
 		pct(idle, node_time));

@@ -18,12 +18,11 @@ extern FILE *result;
 /*
  * Bandwidth unit. A .tpl link weight is given in Mbit/s; multiplying it by
  * Bpms converts it to the bytes-per-ms capacity every rate computation in the
- * flow model works in (topo_multi_read does this once, at load). Integer
- * division truncates the exact 131.072 to 131 -- a deliberate ~0.05% under-run
- * of nominal capacity, accepted as far below anything the policy/routing
- * comparisons resolve.
+ * flow model works in (topo_multi_read does this once, at load). SI units:
+ * 1 Mbit/s = 10^6 bit/s = 125 B/ms, so 100 Kbit/s (0.1 or "100k") = 12.5 B/ms.
+ * (It used to be 1024*1024/8/1000 = 131, i.e. a 2^20-bit "Mbit", truncated.)
  */
-#define Bpms (1024 * 1024 / 8 / 1000)
+#define Bpms (1000.0 * 1000.0 / 8.0 / 1000.0)
 typedef unsigned int id_t;
 
 enum policy_t {
@@ -146,7 +145,7 @@ struct flow {
 	int stage;		/* stage of t that started this flow, for the log */
 	int control;		/* a control message (config.control_bytes), not a model */
 	int marked;
-	int min_bw;
+	double min_bw;		/* B/ms, fractional below ~1 Mbit/s or under contention */
 	struct vp_vec path, path_aux;
 	struct task *t;
 	struct event *finish_ev;

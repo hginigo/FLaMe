@@ -73,9 +73,9 @@ void flow_start(const struct event *ev)
 		path_attach_flow(&f->path_aux, f, 0);
 	}
 	f->min_bw = path_min_bw(&f->path);
-	f->makespan = f->nbytes / (f->min_bw);
+	f->makespan = (time_t) ((double) f->nbytes / f->min_bw);	/* floored, as before */
 	log_line("FLOW_START", t->node, t, f->stage,
-		"f%u %u->%u %zuB path %s load %s bw %dB/ms eta %ldms",
+		"f%u %u->%u %zuB path %s load %s bw %.2fB/ms eta %ldms",
 		f->id, flow_src(f), flow_dst(f), f->nbytes_total,
 		log_path(path, sizeof(path), &f->path),
 		log_load(load, sizeof(load), &f->path),

@@ -55,8 +55,9 @@ struct config {
     int   nshards;               /* dataset partitions; defaults to node count */
     long long ms_per_epoch;      /* advisory hint passed to the backend at init */
     int   latency_ms;            /* default per-link propagation delay; .tpl lines may override */
-    int   bandwidth_mbps;        /* default per-link capacity in Mbit/s for .tpl edges that give
-                                    no weight (or "-"); 0 = unset, every edge must carry one */
+    double bandwidth_mbps;       /* default per-link capacity in Mbit/s (SI) for .tpl edges that
+                                    give no weight (or "-"); decimals and k/M/G suffixes accepted
+                                    ("0.1" == "100k"). 0 = unset, every edge must carry one */
     enum routing_mode routing;  /* ROUTING_STATIC (default): hop-count path precomputed once
                                     at startup. ROUTING_DYNAMIC: each flow resolves its path
                                     ad-hoc from current link contention. */
@@ -80,5 +81,8 @@ int config_override(struct config *cfg, const char *arg);
 /* Parse a comma-separated id list ("3,7"; "" = none) into ids[0..max).
  * ids may be NULL to only validate. Returns the count, or -1 if malformed. */
 int config_id_list(const char *val, long long *ids, int max);
+/* Parse a link rate: Mbit/s, decimals and SI k/M/G suffixes ("100k" == "0.1").
+ * Returns 0 and sets *mbps, or -1 if malformed or not positive. */
+int config_parse_mbps(const char *val, double *mbps);
 
 #endif /* _CONFIG_H*/

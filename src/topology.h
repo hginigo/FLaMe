@@ -6,7 +6,7 @@
 struct link {
     id_t orig;
     id_t dest;
-    int weight;         /* capacity in B/ms: .tpl weight (Mbit/s) * Bpms */
+    double weight;      /* capacity in B/ms: .tpl weight (Mbit/s) * Bpms */
     int latency;        /* fixed one-hop propagation delay, in ms */
     struct vp_vec active_flows;
 };
@@ -20,7 +20,7 @@ struct topology {
 
 struct link *link_alloc(id_t orig,
                         id_t dest,
-                        int weight,
+                        double weight,
                         int latency);
 void topo_init(struct topology *t, size_t num_nodes);
 void topo_free(struct topology *t);
