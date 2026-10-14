@@ -13,10 +13,24 @@ extern struct topology topology;
 extern time_t sim_time;
 extern struct config config;
 
+/* Close the interval since this link's flow count last changed. Called just
+ * before every change, so each interval is charged at the count it really had. */
+static void link_account(struct link *l)
+{
+	time_t dt = sim_time - l->last_change;
+
+	l->flow_ms += (long long) l->active_flows.length * dt;
+	if (l->active_flows.length) {
+		l->busy_ms += dt;
+	}
+	l->last_change = sim_time;
+}
+
 void path_attach_flow(struct vp_vec *path, struct flow *f, int record)
 {
 	struct link *l;
 	vp_for (l, path) {
+		link_account(l);
 		vp_vec_append(&l->active_flows, f);
 		if (record) {
 			metric_observe(&metrics.link_contention, (long long) l->active_flows.length);
@@ -31,6 +45,7 @@ void path_detach_flow(struct vp_vec *path, struct flow *f, int record)
 	vp_for (l, path) {
 		ind = vp_vec_index(&l->active_flows, f);
 		assert(ind > -1);
+		link_account(l);
 		vp_vec_remove(&l->active_flows, (size_t) ind);
 		if (record) {
 			metric_observe(&metrics.link_contention, (long long) l->active_flows.length);

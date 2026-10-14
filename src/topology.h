@@ -9,6 +9,12 @@ struct link {
     double weight;      /* capacity in B/ms: .tpl weight (Mbit/s) * Bpms */
     int latency;        /* fixed one-hop propagation delay, in ms */
     struct vp_vec active_flows;
+    /* Time-weighted occupancy, advanced by link_account() on every change to
+     * active_flows: flow_ms is the integral of active_flows.length over sim
+     * time, busy_ms the time it was non-zero, last_change when it last moved. */
+    time_t last_change;
+    long long flow_ms;
+    long long busy_ms;
 };
 
 struct topology {

@@ -463,6 +463,12 @@ int main(int argc, char *argv[])
 	wl_virt_rounds(&tasks);
 
 	metrics_init();
+	{
+		const struct model *m;
+		vp_for (m, &models) {		/* initial placement, made before the reset */
+			metric_observe(&metrics.model_copies, (long long) m->replicas.length);
+		}
+	}
 	metrics.tasks_total = (long long) tasks.length;
 
 	tasks_enqueue(&tasks);

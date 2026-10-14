@@ -42,6 +42,8 @@ void metrics_init(void)
     metric_init(&metrics.ctrl_hops, "ctrl flow hops");
     metric_init(&metrics.ctrl_bytes, "ctrl flow size (B)");
     metric_init(&metrics.link_contention, "link contention");
+    metric_init(&metrics.model_copies, "model copies");
+    metric_init(&metrics.staged, "staged snapshots");
     metric_init(&metrics.node_finish_ms, "node finish (ms)");
     metrics.tasks_total = 0;
     metrics.tasks_done = 0;

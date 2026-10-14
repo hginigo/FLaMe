@@ -72,6 +72,58 @@ static size_t physical_links(void)
 	return topology.directed ? n : n / 2;
 }
 
+/*
+ * Time-weighted link figures over the physical graph. On an undirected
+ * topology each edge is two link objects that always hold the same flows (one
+ * through f->path, the other through f->path_aux), so each edge is counted once.
+ * Every flow has detached by the end of a completed run, so each link's
+ * integrals are already closed at the makespan.
+ */
+/* count/min/avg/max of per-link values, for the table. */
+struct spread {
+	size_t count;
+	double min, sum, max;
+};
+
+static void spread_add(struct spread *d, double v)
+{
+	if (!d->count || v < d->min) d->min = v;
+	if (!d->count || v > d->max) d->max = v;
+	d->sum += v;
+	d->count++;
+}
+
+static double spread_avg(const struct spread *d)
+{
+	return d->count ? d->sum / (double) d->count : 0.0;
+}
+
+struct link_use {
+	struct spread busy;	/* per link: share of the run with >= 1 flow, % */
+	struct spread flows;	/* per link: mean flows sharing it over the run */
+	double flows_busy;	/* all links pooled: mean flows while busy */
+};
+
+static struct link_use link_use(void)
+{
+	struct link_use u = {0};
+	const struct link *l;
+	long long flow = 0, busy = 0;
+
+	if (sim_time <= 0) return u;
+	for (size_t i = 0; i < topology.num_nodes; i++) {
+		vp_for (l, &topology.adj_lists[i]) {
+			if (!topology.directed && l->orig > l->dest) continue;
+			spread_add(&u.busy, 100.0 * (double) l->busy_ms / (double) sim_time);
+			spread_add(&u.flows, (double) l->flow_ms / (double) sim_time);
+			flow += l->flow_ms;
+			busy += l->busy_ms;
+		}
+	}
+	u.flows_busy = busy ? (double) flow / (double) busy : 0.0;
+	return u;
+}
+
 static int rounds(void)
 {
 	int r = 0;
@@ -98,6 +150,13 @@ static double pct(long long part, long long whole)
 	return whole > 0 ? 100.0 * (double) part / (double) whole : 0.0;
 }
 
+static void row_spread(const char *name, const struct spread *d)
+{
+	if (d->count == 0) return;
+	out("  %-22s %9zu %9.2f %11.2f %9.2f\n",
+		name, d->count, d->min, spread_avg(d), d->max);
+}
+
 static void row(const struct metric *m)
 {
 	if (m->count == 0) return;
@@ -113,6 +172,12 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 	long long busy = 0, idle;
 	long long nodes_done = M->node_finish_ms.count;
 	char topo[256], a[32], b[32];
+	/* Control signalling relative to model transfers. 0 when a run moved no
+	 * models (self-learning), where there is nothing to relate it to. */
+	double ctrl_per_data = M->data_bytes.count
+		? (double) M->ctrl_bytes.count / (double) M->data_bytes.count : 0.0;
+	double ctrl_bytes_pct = pct(M->ctrl_bytes.sum, M->ctrl_bytes.sum + M->data_bytes.sum);
+	struct link_use lu = link_use();
 
 	for (int i = 0; i < N_TASK_TYPES; i++) {
 		busy += M->task_ms[i].sum;
@@ -147,9 +212,16 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		out("agents     %zu disconnected (no READ in any round)  %lld reads dropped"
 			" (no physical path)\n", isolated_nodes(), M->reads_dropped);
 	}
+	out("links      busy %.2f%% of the run on average (busiest %.2f%%)  flows sharing a"
+		" link %.3f over the run, %.3f while busy\n",
+		spread_avg(&lu.busy), lu.busy.max, spread_avg(&lu.flows), lu.flows_busy);
 	out("traffic    data %s in %lld flows  control %s in %lld flows\n",
 		bytes_human(a, sizeof(a), M->data_bytes.sum), M->data_bytes.count,
 		bytes_human(b, sizeof(b), M->ctrl_bytes.sum), M->ctrl_bytes.count);
+	if (M->data_bytes.count) {
+		out("overhead   %.2f control flows per data flow  control is %.4f%% of bytes sent\n",
+			ctrl_per_data, ctrl_bytes_pct);
+	}
 
 	if (M->tasks_done < M->tasks_total) {
 		out("WARNING    %lld of %lld tasks never completed and %lld of %zu nodes never"
@@ -172,6 +244,10 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 	row(&M->ctrl_bytes);
 	row(&M->ctrl_hops);
 	row(&M->link_contention);
+	row(&M->model_copies);
+	row(&M->staged);
+	row_spread("link busy (%)", &lu.busy);
+	row_spread("link flows (time avg)", &lu.flows);
 	out("\n");
 
 	out("result policy=%s policy_id=%d routing=%s backend=%s barriers=%s"
@@ -183,7 +259,10 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		" train_pct=%.2f read_pct=%.2f write_pct=%.2f barrier_pct=%.2f idle_pct=%.2f"
 		" data_flows=%lld data_bytes=%lld data_xfer_ms_avg=%.2f data_bw_avg=%.2f"
 		" data_hops_avg=%.3f ctrl_flows=%lld ctrl_bytes=%lld ctrl_hops_avg=%.3f"
-		" link_contention_avg=%.3f isolated_nodes=%zu reads_dropped=%lld\n",
+		" link_contention_avg=%.3f isolated_nodes=%zu reads_dropped=%lld"
+		" model_copies_avg=%.3f model_copies_max=%lld staged_avg=%.3f staged_max=%lld"
+		" link_busy_pct_avg=%.3f link_busy_pct_max=%.3f link_flows_avg=%.4f"
+		" link_flows_busy_avg=%.4f ctrl_per_data_flow=%.4f ctrl_bytes_pct=%.6f\n",
 		pol, (int) policy, routing_name(config.routing),
 		backend_name(config.backend_mode), config.barriers ? "on" : "off",
 		topo, (size_t) nodes.length, physical_links(), rounds(),
@@ -201,5 +280,9 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		M->data_bytes.count, M->data_bytes.sum, metric_avg(&M->data_xfer_ms),
 		metric_avg(&M->data_bw), metric_avg(&M->data_hops),
 		M->ctrl_bytes.count, M->ctrl_bytes.sum, metric_avg(&M->ctrl_hops),
-		metric_avg(&M->link_contention), isolated_nodes(), M->reads_dropped);
+		metric_avg(&M->link_contention), isolated_nodes(), M->reads_dropped,
+		metric_avg(&M->model_copies), M->model_copies.count ? M->model_copies.max : 0LL,
+		metric_avg(&M->staged), M->staged.count ? M->staged.max : 0LL,
+		spread_avg(&lu.busy), lu.busy.max, spread_avg(&lu.flows), lu.flows_busy,
+		ctrl_per_data, ctrl_bytes_pct);
 }

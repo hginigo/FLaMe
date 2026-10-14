@@ -164,5 +164,8 @@ struct replica *model_replica_first(const struct model *m);
 void model_replica_clear(struct model *m);
 void model_replica_relocate(struct replica *r, struct node *n);
 void model_replica_keep_only(struct model *m, struct replica *keep);
+void model_replica_add(struct model *m, struct replica *r);
+void node_stage(struct node *n, struct replica *r);
+void node_stage_clear(struct node *n);
 
 #endif // _STRUCTS_H

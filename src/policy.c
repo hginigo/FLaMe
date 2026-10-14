@@ -127,10 +127,7 @@ long long aggregate_into(struct node *orig, struct replica *r)
     free(nbytes);
     free(stale);
 
-    vp_for (s, &orig->staged) {
-        replica_free(s);
-    }
-    orig->staged.length = 0;
+    node_stage_clear(orig);
 
     free(r->params);
     r->params = new_params;
@@ -167,7 +164,7 @@ static void single_copy_read_stage(struct task *t, int relocate)
         flow_enqueue(dest->id, orig->id, src->nbytes, t);
     break;
     case 2:
-        vp_vec_append(&orig->staged, replica_dup(src, orig, sim_time));
+        node_stage(orig, replica_dup(src, orig, sim_time));
         if (relocate) {
             model_replica_relocate(src, orig);
         }
@@ -217,8 +214,8 @@ static void multi_copy_read_stage(struct task *t)
     break;
     case 2:
         src = nearest_replica(t->model, orig, &topology);
-        vp_vec_append(&t->model->replicas, replica_dup(src, orig, sim_time));
-        vp_vec_append(&orig->staged, replica_dup(src, orig, sim_time));
+        model_replica_add(t->model, replica_dup(src, orig, sim_time));
+        node_stage(orig, replica_dup(src, orig, sim_time));
         ev = event_alloc(PULL_TASK, sim_time);
         ev->data.n = orig;
         event_enqueue(ev);
@@ -380,7 +377,7 @@ static int mcm_write_stage(struct task *t)
     break;
     case 3:
         mine = replica_dup(nearest_replica(t->model, orig, &topology), orig, sim_time);
-        vp_vec_append(&t->model->replicas, mine);
+        model_replica_add(t->model, mine);
         sim_ms = aggregate_into(orig, mine);
         ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
         ev->data.t = t;
@@ -454,7 +451,7 @@ static int mcu_write_stage(struct task *t)
     break;
     case 2:
         mine = replica_dup(nearest_replica(t->model, orig, &topology), orig, sim_time);
-        vp_vec_append(&t->model->replicas, mine);
+        model_replica_add(t->model, mine);
         sim_ms = aggregate_into(orig, mine);
         ev = event_alloc(STAGE_NEXT, sim_time + sim_ms);
         ev->data.t = t;

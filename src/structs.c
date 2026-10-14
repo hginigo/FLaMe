@@ -1,4 +1,5 @@
 #include "structs.h"
+#include "metrics.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -95,6 +96,36 @@ void model_replica_keep_only(struct model *m, struct replica *keep)
 	}
 	m->replicas.length = 0;
 	vp_vec_append(&m->replicas, keep);
+	metric_observe(&metrics.model_copies, 1);
+}
+
+/* A new copy joins the model's copy set. */
+void model_replica_add(struct model *m, struct replica *r)
+{
+	vp_vec_append(&m->replicas, r);
+	metric_observe(&metrics.model_copies, (long long) m->replicas.length);
+}
+
+/* A snapshot pulled from a peer, held for the node's next aggregation. */
+void node_stage(struct node *n, struct replica *r)
+{
+	vp_vec_append(&n->staged, r);
+	metric_observe(&metrics.staged, (long long) n->staged.length);
+}
+
+/* The node's aggregation consumed its snapshots. */
+void node_stage_clear(struct node *n)
+{
+	struct replica *s;
+
+	if (!n->staged.length) {
+		return;
+	}
+	vp_for (s, &n->staged) {
+		replica_free(s);
+	}
+	n->staged.length = 0;
+	metric_observe(&metrics.staged, 0);
 }
 
 void models_free(struct vp_vec *models)

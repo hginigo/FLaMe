@@ -162,6 +162,9 @@ struct link *link_alloc(id_t orig,
     aux->weight = weight;
     aux->latency = latency;
     memset(&aux->active_flows, 0, sizeof(struct vp_vec));
+    aux->last_change = 0;
+    aux->flow_ms = 0;
+    aux->busy_ms = 0;
     return aux;
 }
 

@@ -39,6 +39,10 @@ struct run_metrics {
     struct metric data_xfer_ms;             /* transmission time, latency excluded */
     struct metric data_bw;                  /* effective B/ms: bytes / transfer time */
     struct metric link_contention;          /* active flows, sampled per attach/detach */
+    struct metric model_copies;             /* nodes holding a copy of a model, sampled
+                                               per model each time that number changes */
+    struct metric staged;                   /* snapshots a node holds for its next
+                                               aggregation, sampled per change */
     struct metric node_finish_ms;           /* one per node that drained its queue */
     long long tasks_total, tasks_done;
     long long reads_dropped;    /* overlay READs with no physical path; counted at
