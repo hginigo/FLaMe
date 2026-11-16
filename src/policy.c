@@ -4,6 +4,7 @@
 #include "flow.h"
 #include "backend.h"
 #include "config.h"
+#include "metrics.h"
 #include "vp_vec.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,12 +58,12 @@ void train_stage(struct task *t)
     double loss, acc;
     void *new_params;
     size_t new_nbytes;
-    struct event *ev;
 
     if (!r) {
         r = model_replica_first(t->model);
     }
     assert(r != NULL);
+    orig->round++;
 
     if (backend_train(orig->id, r->version, config.epochs, r->params, r->nbytes,
             &new_version, &sim_ms, &loss, &acc, &new_params, &new_nbytes) < 0) {
@@ -73,14 +74,13 @@ void train_stage(struct task *t)
     r->params = new_params;
     r->nbytes = new_nbytes;
     r->version = new_version;
+    r->round = orig->round;
     r->stamp = sim_time + sim_ms;
     orig->loss = loss;
     orig->acc = acc;
     orig->trained = 1;
 
-    ev = event_alloc(PULL_TASK, sim_time + sim_ms);
-    ev->data.n = orig;
-    event_enqueue(ev);
+    task_done(t, sim_time + sim_ms);
 }
 
 void barrier_stage(struct task *t)
@@ -91,10 +91,55 @@ void barrier_stage(struct task *t)
 }
 
 /*
+ * Newest version of m whose params exist at sim_time, read off the replica
+ * that produces m's versions: its owner's (model ids are owner node ids), or
+ * the only copy once a single-copy policy has moved it. TRAIN and
+ * aggregation bump that replica's version when they start but stamp it with
+ * the time they finish, so until then the previous version is the newest.
+ * Other replicas can't be used: a reader's copy is stamped when it was
+ * captured, so a version fetched early would look already produced.
+ */
+static unsigned int newest_version(const struct model *m)
+{
+    struct replica *r, *src = model_replica_first(m);
+
+    vp_for (r, &m->replicas) {
+        if (r->node->id == m->id) {
+            src = r;
+            break;
+        }
+    }
+    return (sim_time >= src->stamp || !src->version) ? src->version : src->version - 1;
+}
+
+/* Stages a snapshot of src for orig's next aggregation, remembering the
+ * model's newest version right now so aggregate_into can tell a copy that
+ * was already stale when obtained from one that went stale while waiting. */
+static void stage_copy(struct node *orig, const struct replica *src)
+{
+    struct replica *snap = replica_dup(src, orig, sim_time);
+
+    snap->capture_newest = newest_version(src->model);
+    node_stage(orig, snap);
+}
+
+/*
  * Aggregates `r` (the current authoritative replica for t->model, wherever
  * it physically sits) with every snapshot orig has staged since its last
  * WRITE. Mutates r in place with the backend's result and clears the
  * staged list. Returns the elapsed sim_ms so the caller can advance time.
+ *
+ * Also records how many of the staged copies it folds are incoherent: their
+ * version isn't their model's newest at this moment, either older (stale:
+ * also recorded with how many versions behind) or ahead of it (handed out
+ * before the owner finished producing it). A stale copy that was already
+ * older than the newest version when it was staged is also recorded as
+ * protocol staleness, as opposed to pipeline lag: obtained current, then
+ * the owner moved on before this aggregation. r itself is checked too but
+ * only counted if incoherent, which no current policy does.
+ *
+ * And, per staged copy, its round skew: orig's round minus the round the
+ * copy's model was produced in (+k: k rounds behind orig, -k: ahead).
  */
 long long aggregate_into(struct node *orig, struct replica *r)
 {
@@ -104,10 +149,19 @@ long long aggregate_into(struct node *orig, struct replica *r)
     long long *stale = malloc(count * sizeof(long long));
     struct replica *s;
     int i = 1;
+    int copies = (int) orig->staged.length, incoherent = 0;
+    unsigned int newest = newest_version(r->model);
     long long sim_ms;
     void *new_params;
     size_t new_nbytes;
 
+    if (r->version != newest) {
+        copies++;
+        incoherent++;
+        if (r->version < newest) {
+            metric_observe(&metrics.agg_stale, (long long) (newest - r->version));
+        }
+    }
     blobs[0] = r->params;
     nbytes[0] = r->nbytes;
     stale[0] = sim_time - r->stamp;
@@ -115,8 +169,20 @@ long long aggregate_into(struct node *orig, struct replica *r)
         blobs[i] = s->params;
         nbytes[i] = s->nbytes;
         stale[i] = sim_time - s->stamp;
+        newest = newest_version(s->model);
+        incoherent += s->version != newest;
+        metric_observe(&metrics.agg_round_skew, (long long) (orig->round - s->round));
+        if (s->version < newest) {
+            metric_observe(&metrics.agg_stale, (long long) (newest - s->version));
+            if (s->version < s->capture_newest) {
+                metric_observe(&metrics.agg_stale_protocol,
+                    (long long) (newest - s->version));
+            }
+        }
         i++;
     }
+    metric_observe(&metrics.agg_copies, copies);
+    metric_observe(&metrics.agg_incoherent, incoherent);
 
     if (backend_aggregate(orig->id, count, stale, blobs, nbytes,
             &sim_ms, &new_params, &new_nbytes) < 0) {
@@ -133,6 +199,7 @@ long long aggregate_into(struct node *orig, struct replica *r)
     r->params = new_params;
     r->nbytes = new_nbytes;
     r->version++;
+    r->round = orig->round;
     r->stamp = sim_time + sim_ms;
     return sim_ms;
 }
@@ -141,19 +208,18 @@ long long aggregate_into(struct node *orig, struct replica *r)
  * READ under SCU/SCM (single physical copy). `relocate` selects the
  * coherence effect on completion: 0 = leave the copy where it is (SCU,
  * "update"), 1 = the copy migrates to the reader (SCM, "move"). Either
- * way, a snapshot is staged on the reader for its own next aggregation.
+ * way, a snapshot is staged on the reader for its own next aggregation,
+ * also when the reader already holds the copy and nothing needs fetching.
  */
 static void single_copy_read_stage(struct task *t, int relocate)
 {
-    struct event *ev;
     struct node *orig = t->node, *dest;
     struct replica *src = model_replica_first(t->model);
 
     dest = src->node;
     if (orig->id == dest->id) {
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = orig;
-        event_enqueue(ev);
+        stage_copy(orig, src);
+        task_done(t, sim_time);
         return;
     }
     switch (t->stage) {
@@ -164,13 +230,11 @@ static void single_copy_read_stage(struct task *t, int relocate)
         flow_enqueue(dest->id, orig->id, src->nbytes, t);
     break;
     case 2:
-        node_stage(orig, replica_dup(src, orig, sim_time));
+        stage_copy(orig, src);
         if (relocate) {
             model_replica_relocate(src, orig);
         }
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = orig;
-        event_enqueue(ev);
+        task_done(t, sim_time);
     break;
     }
     t->stage++;
@@ -182,18 +246,19 @@ static void scm_read_stage(struct task *t) { single_copy_read_stage(t, 1); }
 /*
  * READ under MCM/MCU (multi-copy): fetch from the nearest holder and join
  * the replica set, plus stage a snapshot for the reader's own aggregation.
+ * A reader already in the replica set skips the fetch and stages the copy it
+ * holds instead, so that neighbour still takes part in its aggregation.
  * Byte-identical between the two policies — only their WRITE differs.
  */
 static void multi_copy_read_stage(struct task *t)
 {
-    struct event *ev;
     struct node *orig = t->node;
-    struct replica *src;
+    struct replica *src, *held;
 
-    if (model_replica_of(t->model, orig)) {
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = orig;
-        event_enqueue(ev);
+    held = model_replica_of(t->model, orig);
+    if (held) {
+        stage_copy(orig, held);
+        task_done(t, sim_time);
         return;
     }
     switch (t->stage) {
@@ -201,9 +266,7 @@ static void multi_copy_read_stage(struct task *t)
         src = nearest_replica(t->model, orig, &topology);
         if (!src) {
             /* every copy sits across a partition: nothing to read */
-            ev = event_alloc(PULL_TASK, sim_time);
-            ev->data.n = orig;
-            event_enqueue(ev);
+            task_done(t, sim_time);
             return;
         }
         flow_enqueue(orig->id, src->node->id, (size_t) config.control_bytes, t);
@@ -215,10 +278,8 @@ static void multi_copy_read_stage(struct task *t)
     case 2:
         src = nearest_replica(t->model, orig, &topology);
         model_replica_add(t->model, replica_dup(src, orig, sim_time));
-        node_stage(orig, replica_dup(src, orig, sim_time));
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = orig;
-        event_enqueue(ev);
+        stage_copy(orig, src);
+        task_done(t, sim_time);
     break;
     }
     t->stage++;
@@ -234,7 +295,7 @@ static void stage_advance_now(struct task *t)
 /*
  * WRITE implementations. Each returns 1 if policy_dispatch should advance
  * t->stage afterwards, or 0 if the task was already fully retired (e.g. the
- * local-write fast path scheduled its own PULL_TASK directly).
+ * local-write fast path scheduled its own task_done directly).
  */
 
 static int scu_write_stage(struct task *t)
@@ -249,9 +310,7 @@ static int scu_write_stage(struct task *t)
     dest = r->node;
     if (orig->id == dest->id) {
         sim_ms = aggregate_into(orig, r);
-        ev = event_alloc(PULL_TASK, sim_time + sim_ms);
-        ev->data.n = orig;
-        event_enqueue(ev);
+        task_done(t, sim_time + sim_ms);
         return 0;
     }
     switch (t->stage) {
@@ -271,9 +330,7 @@ static int scu_write_stage(struct task *t)
         flow_enqueue(orig->id, dest->id, r->nbytes, t);
     break;
     case 4:
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = orig;
-        event_enqueue(ev);
+        task_done(t, sim_time);
     break;
     }
     return 1;
@@ -291,9 +348,7 @@ static int scm_write_stage(struct task *t)
     dest = r->node;
     if (orig->id == dest->id) {
         sim_ms = aggregate_into(orig, r);
-        ev = event_alloc(PULL_TASK, sim_time + sim_ms);
-        ev->data.n = orig;
-        event_enqueue(ev);
+        task_done(t, sim_time + sim_ms);
         return 0;
     }
     switch (t->stage) {
@@ -311,9 +366,7 @@ static int scm_write_stage(struct task *t)
     break;
     case 3:
         model_replica_relocate(r, orig);
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = t->node;
-        event_enqueue(ev);
+        task_done(t, sim_time);
     break;
     }
     return 1;
@@ -352,9 +405,7 @@ static int mcm_write_stage(struct task *t)
         break;
         case 2:
             model_replica_keep_only(t->model, own);
-            ev = event_alloc(PULL_TASK, sim_time);
-            ev->data.n = t->node;
-            event_enqueue(ev);
+            task_done(t, sim_time);
         break;
         }
         return 1;
@@ -386,9 +437,7 @@ static int mcm_write_stage(struct task *t)
     case 4:
         own = model_replica_of(t->model, orig);
         model_replica_keep_only(t->model, own);
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = t->node;
-        event_enqueue(ev);
+        task_done(t, sim_time);
     break;
     }
     return 1;
@@ -423,6 +472,7 @@ static int mcu_write_stage(struct task *t)
                 r2->params = params_dup(own->params, own->nbytes);
                 r2->nbytes = own->nbytes;
                 r2->version = own->version;
+                r2->round = own->round;
                 r2->stamp = own->stamp;
                 sent++;
             }
@@ -431,9 +481,7 @@ static int mcu_write_stage(struct task *t)
             }
         break;
         case 2:
-            ev = event_alloc(PULL_TASK, sim_time);
-            ev->data.n = t->node;
-            event_enqueue(ev);
+            task_done(t, sim_time);
         break;
         }
         return 1;
@@ -468,13 +516,12 @@ static int mcu_write_stage(struct task *t)
             r2->params = params_dup(mine->params, mine->nbytes);
             r2->nbytes = mine->nbytes;
             r2->version = mine->version;
+            r2->round = mine->round;
             r2->stamp = mine->stamp;
         }
     break;
     case 4:
-        ev = event_alloc(PULL_TASK, sim_time);
-        ev->data.n = t->node;
-        event_enqueue(ev);
+        task_done(t, sim_time);
     break;
     }
     return 1;

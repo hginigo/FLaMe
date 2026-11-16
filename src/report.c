@@ -171,7 +171,7 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 	long long node_time = (long long) nodes.length * (long long) sim_time;
 	long long busy = 0, idle;
 	long long nodes_done = M->node_finish_ms.count;
-	char topo[256], a[32], b[32];
+	char topo[256], a[32], b[32], ports[16];
 	/* Control signalling relative to model transfers. 0 when a run moved no
 	 * models (self-learning), where there is nothing to relate it to. */
 	double ctrl_per_data = M->data_bytes.count
@@ -180,14 +180,16 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 	struct link_use lu = link_use();
 
 	for (int i = 0; i < N_TASK_TYPES; i++) {
-		busy += M->task_ms[i].sum;
+		busy += M->node_ms[i];
 	}
 	idle = node_time - busy;
 
+	if (config.ports > 0) snprintf(ports, sizeof(ports), "%d", config.ports);
+	else snprintf(ports, sizeof(ports), "unlimited");
 	out("\n");
-	out("run        %s (%d)  routing %s  backend %s  barriers %s\n",
+	out("run        %s (%d)  routing %s  backend %s  barriers %s  ports %s\n",
 		pol, (int) policy, routing_name(config.routing),
-		backend_name(config.backend_mode), config.barriers ? "on" : "off");
+		backend_name(config.backend_mode), config.barriers ? "on" : "off", ports);
 	out("topology   %s  %zu nodes  %zu links  %d rounds",
 		token(topo, sizeof(topo), topology_file), (size_t) nodes.length,
 		physical_links(), rounds());
@@ -205,8 +207,8 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 			M->node_finish_ms.max);
 	}
 	out("node time  train %.2f%%  read %.2f%%  write %.2f%%  barrier %.2f%%  idle %.2f%%\n",
-		pct(M->task_ms[TRAIN].sum, node_time), pct(M->task_ms[READ].sum, node_time),
-		pct(M->task_ms[WRITE].sum, node_time), pct(M->task_ms[BARRIER].sum, node_time),
+		pct(M->node_ms[TRAIN], node_time), pct(M->node_ms[READ], node_time),
+		pct(M->node_ms[WRITE], node_time), pct(M->node_ms[BARRIER], node_time),
 		pct(idle, node_time));
 	if (isolated_nodes() || M->reads_dropped) {
 		out("agents     %zu disconnected (no READ in any round)  %lld reads dropped"
@@ -246,6 +248,11 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 	row(&M->link_contention);
 	row(&M->model_copies);
 	row(&M->staged);
+	row(&M->agg_copies);
+	row(&M->agg_incoherent);
+	row(&M->agg_stale);
+	row(&M->agg_stale_protocol);
+	row(&M->agg_round_skew);
 	row_spread("link busy (%)", &lu.busy);
 	row_spread("link flows (time avg)", &lu.flows);
 	out("\n");
@@ -262,7 +269,14 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		" link_contention_avg=%.3f isolated_nodes=%zu reads_dropped=%lld"
 		" model_copies_avg=%.3f model_copies_max=%lld staged_avg=%.3f staged_max=%lld"
 		" link_busy_pct_avg=%.3f link_busy_pct_max=%.3f link_flows_avg=%.4f"
-		" link_flows_busy_avg=%.4f ctrl_per_data_flow=%.4f ctrl_bytes_pct=%.6f\n",
+		" link_flows_busy_avg=%.4f ctrl_per_data_flow=%.4f ctrl_bytes_pct=%.6f"
+		" ports=%d agg_copies=%lld agg_incoherent=%lld agg_incoherent_pct=%.3f"
+		" agg_stale=%lld agg_stale_pct=%.3f agg_stale_versions_min=%lld"
+		" agg_stale_versions_avg=%.3f agg_stale_versions_max=%lld"
+		" agg_stale_protocol=%lld agg_stale_protocol_pct=%.3f"
+		" agg_stale_protocol_versions_min=%lld agg_stale_protocol_versions_avg=%.3f"
+		" agg_stale_protocol_versions_max=%lld"
+		" agg_round_skew_min=%lld agg_round_skew_avg=%.3f agg_round_skew_max=%lld\n",
 		pol, (int) policy, routing_name(config.routing),
 		backend_name(config.backend_mode), config.barriers ? "on" : "off",
 		topo, (size_t) nodes.length, physical_links(), rounds(),
@@ -274,8 +288,8 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		M->node_finish_ms.count ? M->node_finish_ms.max : 0LL,
 		metric_avg(&M->task_ms[TRAIN]), metric_avg(&M->task_ms[READ]),
 		metric_avg(&M->task_ms[WRITE]), metric_avg(&M->task_ms[BARRIER]),
-		pct(M->task_ms[TRAIN].sum, node_time), pct(M->task_ms[READ].sum, node_time),
-		pct(M->task_ms[WRITE].sum, node_time), pct(M->task_ms[BARRIER].sum, node_time),
+		pct(M->node_ms[TRAIN], node_time), pct(M->node_ms[READ], node_time),
+		pct(M->node_ms[WRITE], node_time), pct(M->node_ms[BARRIER], node_time),
 		pct(idle, node_time),
 		M->data_bytes.count, M->data_bytes.sum, metric_avg(&M->data_xfer_ms),
 		metric_avg(&M->data_bw), metric_avg(&M->data_hops),
@@ -284,5 +298,17 @@ void report_print(const char *topology_file, long wall_ms, long cpu_ms)
 		metric_avg(&M->model_copies), M->model_copies.count ? M->model_copies.max : 0LL,
 		metric_avg(&M->staged), M->staged.count ? M->staged.max : 0LL,
 		spread_avg(&lu.busy), lu.busy.max, spread_avg(&lu.flows), lu.flows_busy,
-		ctrl_per_data, ctrl_bytes_pct);
+		ctrl_per_data, ctrl_bytes_pct, config.ports,
+		M->agg_copies.sum, M->agg_incoherent.sum,
+		pct(M->agg_incoherent.sum, M->agg_copies.sum),
+		M->agg_stale.count, pct(M->agg_stale.count, M->agg_copies.sum),
+		M->agg_stale.count ? M->agg_stale.min : 0LL, metric_avg(&M->agg_stale),
+		M->agg_stale.count ? M->agg_stale.max : 0LL,
+		M->agg_stale_protocol.count, pct(M->agg_stale_protocol.count, M->agg_copies.sum),
+		M->agg_stale_protocol.count ? M->agg_stale_protocol.min : 0LL,
+		metric_avg(&M->agg_stale_protocol),
+		M->agg_stale_protocol.count ? M->agg_stale_protocol.max : 0LL,
+		M->agg_round_skew.count ? M->agg_round_skew.min : 0LL,
+		metric_avg(&M->agg_round_skew),
+		M->agg_round_skew.count ? M->agg_round_skew.max : 0LL);
 }

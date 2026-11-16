@@ -43,7 +43,27 @@ struct run_metrics {
                                                per model each time that number changes */
     struct metric staged;                   /* snapshots a node holds for its next
                                                aggregation, sampled per change */
+    struct metric agg_copies;               /* staged snapshots folded per aggregation
+                                               (plus the holder's own replica, only if
+                                               incoherent), one sample per aggregation */
+    struct metric agg_incoherent;           /* of those, how many weren't their model's
+                                               newest version at that moment (see
+                                               newest_version, policy.c) */
+    struct metric agg_stale;                /* one sample per incoherent copy older than
+                                               its model's newest version: how many
+                                               versions behind it was (genuine staleness,
+                                               as opposed to copies handed out before the
+                                               owner finished producing them) */
+    struct metric agg_stale_protocol;       /* the subset already stale when it was
+                                               staged (stage_copy, policy.c): protocol
+                                               staleness rather than pipeline lag */
+    struct metric agg_round_skew;           /* one sample per staged copy folded: the
+                                               aggregator's round minus the round the
+                                               copy's model was produced in (signed) */
     struct metric node_finish_ms;           /* one per node that drained its queue */
+    long long node_ms[N_TASK_TYPES];        /* node time spent per task type: phases with
+                                               >= 1 task in flight, so overlapping READs
+                                               count once (node-time shares) */
     long long tasks_total, tasks_done;
     long long reads_dropped;    /* overlay READs with no physical path; counted at
                                    workload generation, before metrics_init */

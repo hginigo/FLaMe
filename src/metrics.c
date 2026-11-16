@@ -44,7 +44,15 @@ void metrics_init(void)
     metric_init(&metrics.link_contention, "link contention");
     metric_init(&metrics.model_copies, "model copies");
     metric_init(&metrics.staged, "staged snapshots");
+    metric_init(&metrics.agg_copies, "aggregated copies");
+    metric_init(&metrics.agg_incoherent, "incoherent copies");
+    metric_init(&metrics.agg_stale, "stale copies (versions behind)");
+    metric_init(&metrics.agg_stale_protocol, "stale when staged (versions behind)");
+    metric_init(&metrics.agg_round_skew, "round skew (aggregator - copy)");
     metric_init(&metrics.node_finish_ms, "node finish (ms)");
+    for (int i = 0; i < N_TASK_TYPES; i++) {
+        metrics.node_ms[i] = 0;
+    }
     metrics.tasks_total = 0;
     metrics.tasks_done = 0;
     /* reads_dropped is left alone: the workload, generated before this runs,

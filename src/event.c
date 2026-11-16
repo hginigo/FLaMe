@@ -37,3 +37,10 @@ void event_enqueue(struct event *ev)
 {
 	vp_heap_push(&event_queue, ev);
 }
+
+void task_done(struct task *t, time_t at)
+{
+	struct event *ev = event_alloc(TASK_DONE, at);
+	ev->data.t = t;
+	event_enqueue(ev);
+}

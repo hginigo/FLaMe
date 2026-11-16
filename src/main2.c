@@ -127,16 +127,84 @@ void flow_finish(const struct event *ev)
 	flow_dealloc(f);
 }
 
-static void task_retire(struct node *n)
+static void task_retire(struct task *t)
 {
-	struct task *t = n->current_task;
+	struct node *n = t->node;
+	int ind = vp_vec_index(&n->active, t);
 
-	if (!t) {
-		return;
-	}
+	assert(ind > -1);
+	vp_vec_remove(&n->active, (size_t) ind);
 	metric_observe(&metrics.task_ms[t->type], (long long) (sim_time - t->start_time));
 	metrics.tasks_done++;
-	n->current_task = NULL;
+	if (!n->active.length) {
+		metrics.node_ms[t->type] += (long long) (sim_time - n->phase_start);
+	}
+}
+
+static struct task *queue_peek(const struct node *n)
+{
+#ifdef USE_VP_LIST
+	return (struct task *) n->task_queue.first->item;
+#else
+	return vp_vec_get(&n->task_queue, 0);
+#endif
+}
+
+/*
+ * Whether the node may start `next` alongside what it already runs. Only
+ * neighbour fetches overlap: a READ may join other READs, up to config.ports
+ * in flight (0 = no limit). Anything else waits for the node to be idle, so a
+ * WRITE aggregates only once every fetch of its round has landed.
+ */
+static int node_can_start(const struct node *n, const struct task *next)
+{
+	const struct task *t;
+
+	if (!n->active.length) {
+		return 1;
+	}
+	if (next->type != READ) {
+		return 0;
+	}
+	if (config.ports > 0 && n->active.length >= (size_t) config.ports) {
+		return 0;
+	}
+	vp_for (t, &n->active) {
+		if (t->type != READ) {
+			return 0;
+		}
+	}
+	return 1;
+}
+
+/* Start every task the node may start now; record it as done if it has none left. */
+static void node_dispatch(struct node *n)
+{
+	struct task *t;
+	struct event *new;
+
+	while (n->task_queue.length && node_can_start(n, queue_peek(n))) {
+#ifdef USE_VP_LIST
+		t = vp_list_remove_at(&n->task_queue, n->task_queue.first);
+#else
+		t = vp_vec_remove(&n->task_queue, 0);
+#endif
+		if (!n->active.length) {
+			n->phase_start = sim_time;
+		}
+		vp_vec_append(&n->active, t);
+		t->start_time = sim_time;
+		log_line("PULL", n, t, -1, "%zu in flight, %zu queued",
+			(size_t) n->active.length, (size_t) n->task_queue.length);
+
+		new = event_alloc(STAGE_NEXT, sim_time);
+		new->data.t = t;
+		event_enqueue(new);
+	}
+	if (!n->task_queue.length && !n->active.length) {
+		log_line("PULL", n, NULL, -1, "queue empty, node done");
+		metric_observe(&metrics.node_finish_ms, (long long) sim_time);
+	}
 }
 
 void dispatcher_init(struct vp_vec *node_list)
@@ -170,20 +238,17 @@ void flow_dbg(struct task *t)
  */
 void event_print(const struct event *ev)
 {
-	struct node *n;
 	struct task *t;
 	struct flow *f;
 	time_t dur;
 
 	switch (ev->type) {
-	case PULL_TASK:
-		n = ev->data.n;
-		if (n->task_queue.length) {
-			log_line("PULL", n, NULL, -1, "next task, %zu queued",
-				(size_t) n->task_queue.length);
-		} else {
-			log_line("PULL", n, NULL, -1, "queue empty, node done");
-		}
+	case TASK_DONE:
+		t = ev->data.t;
+		log_line("DONE", t->node, t, -1, "took %ldms",
+			(long) (sim_time - t->start_time));
+	break;
+	case PULL_TASK:		/* node_dispatch logs what it pulls */
 	break;
 	case STAGE_NEXT:
 		t = ev->data.t;
@@ -219,8 +284,6 @@ void event_print(const struct event *ev)
 void round_barrier(struct event *ev)
 {
 	struct node *n;
-	struct task *t;
-	struct event *new;
 	static int node_count = 0;
 	static int round = 0;
 	size_t resumed = 0;
@@ -231,36 +294,26 @@ void round_barrier(struct event *ev)
 	if (node_count >= nodes.length) {
 		node_count = 0;
 		vp_for (n, &nodes) {
-			task_retire(n);
-			if (!n->task_queue.length) {
-				metric_observe(&metrics.node_finish_ms, (long long) sim_time);
-				continue;
+			while (n->active.length) {
+				task_retire(vp_vec_get(&n->active, 0));
 			}
-#ifdef USE_VP_LIST
-			t = vp_list_remove_at(&n->task_queue, n->task_queue.first);
-#else
-			t = vp_vec_remove(&n->task_queue, 0);
-#endif
-			n->current_task = t;
-			t->start_time = sim_time;
-
-			new = event_alloc(STAGE_NEXT, sim_time);
-			new->data.t = t;
-			event_enqueue(new);
-			resumed++;
+			if (n->task_queue.length) {
+				resumed++;
+			}
 		}
 		log_line("BARRIER", NULL, NULL, -1, "round %d released, %zu nodes resume",
 			++round, resumed);
+		vp_for (n, &nodes) {
+			node_dispatch(n);
+		}
 	}
 }
 
 void event_process(struct event *ev)
 {
-	struct node *n;
 	struct task *t;
 	struct flow *f;
 
-	struct event *new;
 	event_print(ev);
 
 	switch (ev->type) {
@@ -268,23 +321,12 @@ void event_process(struct event *ev)
 		round_barrier(ev);
 	break;
 	case PULL_TASK:
-		n = ev->data.n;
-		task_retire(n);
-		if (!n->task_queue.length) {
-			metric_observe(&metrics.node_finish_ms, (long long) sim_time);
-			break;
-		}
-#ifdef USE_VP_LIST
-		t = vp_list_remove_at(&n->task_queue, n->task_queue.first);
-#else
-		t = vp_vec_remove(&n->task_queue, 0);
-#endif
-		n->current_task = t;
-		t->start_time = sim_time;
-
-		new = event_alloc(STAGE_NEXT, sim_time);
-		new->data.t = t;
-		event_enqueue(new);
+		node_dispatch(ev->data.n);
+	break;
+	case TASK_DONE:
+		t = ev->data.t;
+		task_retire(t);
+		node_dispatch(t->node);
 	break;
 	case STAGE_NEXT:
 		if (policy == FLOW_DEBUG) {

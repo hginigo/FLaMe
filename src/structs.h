@@ -70,6 +70,9 @@ struct replica {
 	size_t nbytes;
 	unsigned int version;
 	time_t stamp;		/* sim_time these params were produced/captured */
+	unsigned int capture_newest;	/* staged snapshots only: the model's newest
+					   version when it was staged (stage_copy) */
+	int round;		/* round these params were produced in (copies inherit it) */
 };
 
 #define N_OPS 5
@@ -84,7 +87,8 @@ struct node {
 #else
 	struct vp_vec task_queue;
 #endif
-	struct task *current_task;
+	struct vp_vec active;	/* struct task* in flight; >1 only for parallel READs */
+	time_t phase_start;	/* when active last went from empty to non-empty */
 	id_t id;
 	id_t group;
 	long long op_time[N_OPS];
@@ -92,6 +96,7 @@ struct node {
 	double loss, acc;	/* last values reported by the backend */
 	int trained;		/* has the backend ever trained this node? */
 	int n_reads;		/* READs the workload gave it; 0 = disconnected agent */
+	int round;		/* TRAINs started: the round it is in, from 1 */
 };
 
 enum task_t {
@@ -119,7 +124,8 @@ enum event_t {
 	STAGE_NEXT, // t
 	FLOW_START, // f
 	FLOW_FINISH, // f
-	ROUND_BARRIER
+	ROUND_BARRIER,
+	TASK_DONE // t
 };
 
 /* Associated to the event queue */

@@ -16,6 +16,8 @@ struct replica *replica_alloc(struct model *m, struct node *n,
 	r->nbytes = nbytes;
 	r->version = version;
 	r->stamp = stamp;
+	r->capture_newest = 0;
+	r->round = 0;
 	return r;
 }
 
@@ -39,7 +41,10 @@ void *params_dup(const void *params, size_t nbytes)
 struct replica *replica_dup(const struct replica *src, struct node *n, time_t stamp)
 {
 	void *params = params_dup(src->params, src->nbytes);
-	return replica_alloc(src->model, n, params, src->nbytes, src->version, stamp);
+	struct replica *r = replica_alloc(src->model, n, params, src->nbytes, src->version, stamp);
+
+	r->round = src->round;
+	return r;
 }
 
 void replica_free(struct replica *r)
@@ -154,6 +159,9 @@ void nodes_free(struct vp_vec *nodes)
 		}
 		if (n->staged.data != NULL) {
 			vp_vec_free(&n->staged);
+		}
+		if (n->active.data != NULL) {
+			vp_vec_free(&n->active);
 		}
 		free(n);
 	}

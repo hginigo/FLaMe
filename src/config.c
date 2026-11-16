@@ -140,6 +140,10 @@ int config_set(struct config *cfg, const char *key, const char *val, const char 
         }
     } else if (strcmp(key, "control_bytes") == 0) {
         SET_INT(control_bytes);
+    } else if (strcmp(key, "ports") == 0) {
+        long long v_;
+        if (parse_ll(val, &v_) < 0 || v_ < 0 || v_ > 1000000) goto bad_value;
+        cfg->ports = (int) v_;
     } else if (strcmp(key, "hop_penalty") == 0) {
         SET_INT(hop_penalty);
     } else if (strcmp(key, "disconnected") == 0) {
@@ -202,6 +206,7 @@ int load_config(const char *path, struct config *cfg) {
     cfg->ms_per_epoch = 500;
     cfg->control_bytes = 40;
     cfg->hop_penalty = 1600;
+    cfg->ports = 1;
     cfg->backend_mode = BACKEND_SYNTHETIC;
     cfg->model_size = 1048576;   /* 1 MiB */
     cfg->train_time = 400;       /* ms */

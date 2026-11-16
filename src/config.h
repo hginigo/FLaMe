@@ -63,6 +63,8 @@ struct config {
                                     ad-hoc from current link contention. */
     int   control_bytes;         /* size (in bytes) of request/ack control flows, as opposed
                                     to actual block/model transfers */
+    int   ports;                 /* neighbour fetches (READ tasks) a node may have in flight
+                                    at once; 1 = one after another, 0 = no limit */
     int   hop_penalty;           /* ROUTING_HYBRID only: fixed per-hop cost added to each link's
                                     1/bw contention cost, in the same fixed-point units as
                                     link_route_cost (an uncontended mid-weight link is ~100-300);
